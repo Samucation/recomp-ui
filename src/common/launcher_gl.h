@@ -30,6 +30,13 @@ LauncherTexture launcher_texture_load(const char* path);
 // art asset-agnostic instead of hand-editing each game's images.
 LauncherTexture launcher_texture_load_colorkey(const char* path, int tolerance);
 
+// Same as launcher_texture_load, converted to grayscale and darkened
+// (`dim` 0..1 multiplies the luma): "disc not present" cover art.
+LauncherTexture launcher_texture_load_gray(const char* path, float dim);
+
+// Upload raw RGBA8 pixels (w*h*4 bytes). `nearest` != 0 keeps pixel art crisp.
+LauncherTexture launcher_texture_from_rgba(const unsigned char* rgba, int w, int h, int nearest);
+
 void launcher_texture_free(LauncherTexture* t);
 
 #ifdef __cplusplus

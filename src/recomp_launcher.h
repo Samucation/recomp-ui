@@ -1151,6 +1151,8 @@ typedef struct RecompLauncherCGameInfo {
     int         (*game_disc_required)(int i);
     int         (*game_disc_import)(int i, const char* path);
     const char* (*game_discs_notice)(void);
+    /* Optional: image file (png/jpg/tga) with the cover of disc i, or NULL/"" (cover carousel). */
+    const char* (*game_disc_cover)(int i);
 } RecompLauncherCGameInfo;
 
 /* recomp_launcher_run_window return codes */

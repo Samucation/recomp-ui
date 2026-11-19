@@ -20,6 +20,46 @@
 #define STBI_ONLY_JPEG
 #include "third_party/stb_image.h"
 
+static LauncherTexture upload_rgba(const unsigned char* pixels, int w, int h, int nearest) {
+    LauncherTexture t = { 0, 0, 0 };
+    if (!pixels || w <= 0 || h <= 0) return t;
+    GLuint tex = 0;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, nearest ? GL_NEAREST : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, nearest ? GL_NEAREST : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    t.id = (unsigned int)tex;
+    t.w = w; t.h = h;
+    return t;
+}
+
+LauncherTexture launcher_texture_from_rgba(const unsigned char* rgba, int w, int h, int nearest) {
+    return upload_rgba(rgba, w, h, nearest);
+}
+
+LauncherTexture launcher_texture_load_gray(const char* path, float dim) {
+    LauncherTexture t = { 0, 0, 0 };
+    int w = 0, h = 0, comp = 0;
+    unsigned char* pixels = stbi_load(path, &w, &h, &comp, 4);
+    if (!pixels) return t;
+    if (dim < 0.0f) dim = 0.0f;
+    if (dim > 1.0f) dim = 1.0f;
+    for (int i = 0; i < w * h; ++i) {
+        unsigned char* p = pixels + i * 4;
+        float y = (0.299f * p[0] + 0.587f * p[1] + 0.114f * p[2]) * dim;
+        unsigned char v = (unsigned char)(y > 255.0f ? 255.0f : y);
+        p[0] = p[1] = p[2] = v;
+    }
+    t = upload_rgba(pixels, w, h, 0);
+    stbi_image_free(pixels);
+    return t;
+}
+
 // Shared upload path. `colorkey_tol` < 0 disables color-keying.
 static LauncherTexture load_impl(const char* path, int colorkey_tol) {
     LauncherTexture t = { 0, 0, 0 };

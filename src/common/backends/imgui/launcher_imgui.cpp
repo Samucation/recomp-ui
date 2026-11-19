@@ -13,6 +13,7 @@
 #include "launcher_backend.h"
 #include "launcher_boot_timing.h"
 #include "launcher_gl.h"
+#include "launcher_memcard.h"
 #include "launcher_input.h"
 #include "launcher_files.h"
 #include "launcher_debug.h"
@@ -66,6 +67,8 @@
 #endif
 
 #include <algorithm>
+#include <cfloat>
+#include <cmath>
 #include <cerrno>
 #include <cctype>
 #include <cstdio>
@@ -953,11 +956,11 @@ void draw_verdict_block(const LauncherModel* m, const LauncherTheme& th, float a
     // picked (setup wizard) so AutoResize modals don't jump when verify runs.
     const bool pending = !m->rom_present;
     const char* headline =
-        pending          ? "No disc selected" :
-        v.verdict == 1   ? "Disc verified" :
-        v.verdict == 2   ? "Disc verified (warnings)" :
-        v.verdict == 3   ? "Disc verification failed" :
-                           "Disc not recognized";
+        pending          ? "Nenhum disco escolhido" :
+        v.verdict == 1   ? "Disco verificado" :
+        v.verdict == 2   ? "Disco verificado (com avisos)" :
+        v.verdict == 3   ? "Falha ao verificar o disco" :
+                           "Disco não reconhecido";
     // th has no dedicated "bad"/error slot (only good/warn) — reuse warn for
     // the warn AND none cases (both are cautionary, matching the ROM-hash
     // line's existing amber-for-"not recognized" convention) and fall back to
@@ -992,11 +995,11 @@ void draw_verdict_block(const LauncherModel* m, const LauncherTheme& th, float a
         ImGui::TableSetupColumn("v", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("m", ImGuiTableColumnFlags_WidthFixed, px(28));
         const char* dash = "\xE2\x80\x94";
-        kv_row("Serial",     pending ? dash : (v.serial[0] ? v.serial : dash),
+        kv_row("Código",     pending ? dash : (v.serial[0] ? v.serial : dash),
                th, !pending, v.serial[0] != '\0');
-        kv_row("Region",     pending ? dash : (v.region[0] ? v.region : dash),
+        kv_row("Região",     pending ? dash : (v.region[0] ? v.region : dash),
                th, !pending, v.region[0] != '\0');
-        kv_row("ISO header", pending ? dash : (v.iso_ok ? "OK" : "Mismatch"),
+        kv_row("Cabeçalho", pending ? dash : (v.iso_ok ? "OK" : "Diferente"),
                th, !pending, v.iso_ok);
         // TOC fingerprinting is a netplay capability, not part of ordinary
         // offline disc identification. Never expose it for offline titles,
@@ -1115,6 +1118,526 @@ static void draw_game_discs_modal(LauncherModel* m, const LauncherTheme& th) {
     ImGui::EndPopup();
 }
 
+// ===========================================================================
+// Collection cover carousel + PS1 memory-card manager (MM8, 19/11/2026)
+// ===========================================================================
+std::string asset(const char* rel);   // fwd (defined near the end of this namespace)
+
+// ---- memory-card view cache (one per slot), re-read when the file changes --
+struct McView {
+    std::string     path;
+    long long       stamp = -2;
+    LmcCard         card{};
+    LauncherTexture icon[LMC_BLOCKS][3] = {};
+    double          next_check = 0.0;
+};
+McView g_mcv[2];
+
+static long long mc_file_stamp(const std::string& p) {
+    std::error_code ec;
+    const auto sz = std::filesystem::file_size(p, ec);
+    if (ec) return -1;
+    const auto t = std::filesystem::last_write_time(p, ec);
+    if (ec) return -1;
+    // never negative: a negative stamp means "no file" to mcv_get
+    return ((long long)sz * 1000003LL ^ (long long)t.time_since_epoch().count()) & 0x7FFFFFFFFFFFFFFFLL;
+}
+
+static McView& mcv_get(LauncherModel* m, int slot, bool force = false) {
+    McView& v = g_mcv[slot];
+    const double now = ImGui::GetTime();
+    const std::string p = m->s.memcard_path[slot];
+    if (!force && p == v.path && now < v.next_check) return v;
+    v.next_check = now + 1.0;
+    const long long st = p.empty() ? -1 : mc_file_stamp(p);
+    if (!force && p == v.path && st == v.stamp) return v;
+    for (auto& row : v.icon) for (auto& t : row) launcher_texture_free(&t);
+    v.path = p;
+    v.stamp = st;
+    lmc_read(st < 0 ? "" : p.c_str(), &v.card);
+    if (getenv("LNG_MEMCARD_DEBUG"))
+        fprintf(stderr, "launcher: memcard %d '%s' stamp=%lld valid=%d saves=%d\n", slot, p.c_str(), st,
+                v.card.valid, v.card.num_saves);
+    for (int s = 0; s < v.card.num_saves; ++s)
+        for (int f = 0; f < v.card.saves[s].icon_frames && f < 3; ++f)
+            v.icon[s][f] = launcher_texture_from_rgba(v.card.saves[s].icon_rgba[f], 16, 16, 1);
+    return v;
+}
+
+// Animated save icon (PS1 cycles the 1-3 icon frames).
+static void mc_draw_icon(ImDrawList* dl, const McView& v, int save, ImVec2 mn, ImVec2 mx, float alpha) {
+    if (save < 0 || save >= v.card.num_saves) return;
+    const int nf = v.card.saves[save].icon_frames;
+    if (nf <= 0) return;
+    const int f = (int)(ImGui::GetTime() * 3.0) % nf;
+    if (!v.icon[save][f].id) return;
+    dl->AddImage(tid(v.icon[save][f]), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
+                 IM_COL32(255, 255, 255, (int)(alpha * 255.0f)));
+}
+
+struct McManagerState {
+    bool   open_req = false;
+    int    card = 0;          // selected card (0/1)
+    int    block = 0;         // selected block 0..14
+    char   msg[192] = {};
+    bool   msg_bad = false;
+    double msg_until = 0.0;
+};
+McManagerState g_mcm;
+
+static void mc_open_manager(int slot) {
+    g_mcm.open_req = true;
+    g_mcm.card = slot;
+    g_mcm.block = 0;
+    g_mcm.msg[0] = 0;
+}
+
+static void mc_note(const char* msg, bool bad) {
+    snprintf(g_mcm.msg, sizeof(g_mcm.msg), "%s", msg);
+    g_mcm.msg_bad = bad;
+    g_mcm.msg_until = ImGui::GetTime() + 4.0;
+}
+
+static void mc_text_centered(ImDrawList* dl, ImFont* f, float size, ImVec2 c, ImU32 colr, const char* s) {
+    const ImVec2 ts = f->CalcTextSizeA(size, FLT_MAX, 0.0f, s);
+    dl->AddText(f, size, ImVec2(c.x - ts.x * 0.5f, c.y - ts.y * 0.5f), colr, s);
+}
+
+// One card of the manager: label + 3x5 grid of blocks, PS1 layout.
+static void mc_draw_card_grid(LauncherModel* m, int slot, ImVec2 p0, float w, float h) {
+    McView& v = mcv_get(m, slot);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImFont* font = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+    const double t = ImGui::GetTime();
+    const bool sel_card = g_mcm.card == slot;
+
+    // panel
+    dl->AddRectFilled(p0, ImVec2(p0.x + w, p0.y + h), IM_COL32(10, 18, 60, 170), px(14));
+    dl->AddRect(p0, ImVec2(p0.x + w, p0.y + h),
+                sel_card ? IM_COL32(140, 190, 255, 220) : IM_COL32(90, 120, 200, 110), px(14), 0, px(2));
+    char label[48];
+    snprintf(label, sizeof(label), "MEMORY CARD %d", slot + 1);
+    dl->AddText(font, fs * 1.15f, ImVec2(p0.x + px(16), p0.y + px(12)), IM_COL32(230, 236, 255, 255), label);
+    char sub[48];
+    if (!v.card.valid) snprintf(sub, sizeof(sub), "%s", m->s.memcard_path[slot][0] ? "não formatado" : "sem card");
+    else snprintf(sub, sizeof(sub), "%d livre%s", v.card.free_blocks, v.card.free_blocks == 1 ? "" : "s");
+    const ImVec2 subsz = font->CalcTextSizeA(fs, FLT_MAX, 0, sub);
+    dl->AddText(font, fs, ImVec2(p0.x + w - px(16) - subsz.x, p0.y + px(14)), IM_COL32(160, 180, 230, 255), sub);
+    if (!m->s.memcard_enabled[slot]) {
+        const char* off = "DESATIVADO NO JOGO";
+        dl->AddText(font, fs * 0.85f, ImVec2(p0.x + px(16), p0.y + px(14) + fs * 1.25f), IM_COL32(255, 190, 90, 255), off);
+    }
+
+    const float top = p0.y + px(56);
+    const float gap = px(10);
+    float cell = (w - px(32) - gap * 2) / 3.0f;
+    const float cell_h = (h - (top - p0.y) - px(16) - gap * 4) / 5.0f;
+    if (cell > cell_h) cell = cell_h;
+    const float gx = p0.x + (w - (cell * 3 + gap * 2)) * 0.5f;
+    for (int b = 0; b < LMC_BLOCKS; ++b) {
+        const int r = b / 3, c = b % 3;
+        const ImVec2 mn(gx + c * (cell + gap), top + r * (cell + gap));
+        const ImVec2 mx(mn.x + cell, mn.y + cell);
+        const int owner = v.card.valid ? v.card.block_owner[b] : -1;
+        const bool sel = sel_card && g_mcm.block == b;
+        const bool same_save = sel_card && owner >= 0 && v.card.block_owner[g_mcm.block] == owner;
+        dl->AddRectFilled(mn, mx, owner >= 0 ? IM_COL32(28, 44, 120, 230) : IM_COL32(16, 26, 78, 200), px(8));
+        if (owner >= 0) {
+            const bool first = v.card.saves[owner].first_block == b;
+            const float in = cell * 0.12f;
+            mc_draw_icon(dl, v, owner, ImVec2(mn.x + in, mn.y + in), ImVec2(mx.x - in, mx.y - in), first ? 1.0f : 0.35f);
+            if (!first) {   // link mark for the following blocks of a multi-block save
+                dl->AddLine(ImVec2(mn.x + cell * 0.2f, mx.y - cell * 0.12f), ImVec2(mx.x - cell * 0.2f, mx.y - cell * 0.12f),
+                            IM_COL32(150, 190, 255, 200), px(2));
+            }
+        }
+        if (same_save && !sel)
+            dl->AddRect(mn, mx, IM_COL32(150, 190, 255, 120), px(8), 0, px(2));
+        if (sel) {
+            const float pulse = 0.55f + 0.45f * (float)(0.5 + 0.5 * sin(t * 5.0));
+            dl->AddRect(ImVec2(mn.x - px(3), mn.y - px(3)), ImVec2(mx.x + px(3), mx.y + px(3)),
+                        IM_COL32(255, 230, 120, (int)(255 * pulse)), px(10), 0, px(3));
+        } else {
+            dl->AddRect(mn, mx, IM_COL32(80, 110, 200, 140), px(8), 0, px(1));
+        }
+        ImGui::SetCursorScreenPos(mn);
+        ImGui::PushID(slot * 100 + b);
+        if (ImGui::InvisibleButton("##blk", ImVec2(cell, cell))) {
+            g_mcm.card = slot;
+            g_mcm.block = b;
+        }
+        ImGui::PopID();
+    }
+}
+
+static void draw_memcard_manager(LauncherModel* m, const LauncherTheme& th) {
+    (void)th;
+    if (g_mcm.open_req) {
+        ImGui::OpenPopup("##mcmgr");
+        g_mcm.open_req = false;
+        mcv_get(m, 0, true);
+        mcv_get(m, 1, true);
+    }
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const ImVec2 size(vp->Size.x * 0.94f, vp->Size.y * 0.90f);
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(size, ImGuiCond_Always);
+    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    const bool open = ImGui::BeginPopupModal("##mcmgr", nullptr,
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(2);
+    if (!open) return;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    ImFont* font = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+    const ImVec2 wp = ImGui::GetWindowPos();
+    const ImVec2 ws = ImGui::GetWindowSize();
+    const double t = ImGui::GetTime();
+
+    // Background: the PS1 BIOS blue, with slow light bands drifting across.
+    dl->AddRectFilledMultiColor(wp, ImVec2(wp.x + ws.x, wp.y + ws.y),
+        IM_COL32(26, 46, 140, 255), IM_COL32(18, 34, 112, 255),
+        IM_COL32(4, 10, 44, 255), IM_COL32(6, 14, 58, 255));
+    dl->PushClipRect(wp, ImVec2(wp.x + ws.x, wp.y + ws.y), true);
+    for (int k = 0; k < 5; ++k) {
+        const float span = ws.x + ws.y + px(400);
+        const float x = wp.x - ws.y - px(200) + (float)fmod(t * 22.0 + k * span / 5.0, (double)span);
+        const float bw = px(60 + 30 * (k % 3));
+        dl->AddQuadFilled(ImVec2(x, wp.y + ws.y), ImVec2(x + bw, wp.y + ws.y),
+                          ImVec2(x + bw + ws.y, wp.y), ImVec2(x + ws.y, wp.y), IM_COL32(255, 255, 255, 7));
+    }
+    dl->PopClipRect();
+    dl->AddRect(wp, ImVec2(wp.x + ws.x, wp.y + ws.y), IM_COL32(120, 160, 255, 140), px(12), 0, px(2));
+
+    // Keyboard / gamepad navigation over the 6-column board (3 per card).
+    {
+        int col_ = g_mcm.card * 3 + g_mcm.block % 3, row = g_mcm.block / 3;
+        if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadLeft)) col_ = (col_ + 5) % 6;
+        if (ImGui::IsKeyPressed(ImGuiKey_RightArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadRight)) col_ = (col_ + 1) % 6;
+        if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadUp)) row = (row + 4) % 5;
+        if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) || ImGui::IsKeyPressed(ImGuiKey_GamepadDpadDown)) row = (row + 1) % 5;
+        g_mcm.card = col_ / 3;
+        g_mcm.block = row * 3 + col_ % 3;
+    }
+
+    const float pad = px(24);
+    // Header
+    dl->AddText(font, fs * 1.6f, ImVec2(wp.x + pad, wp.y + px(18)), IM_COL32(240, 244, 255, 255), "MEMORY CARD");
+    dl->AddText(font, fs, ImVec2(wp.x + pad, wp.y + px(18) + fs * 1.75f), IM_COL32(150, 175, 235, 255),
+                "Gerenciador de saves  -  setas/direcional para escolher, ESC para sair");
+
+    // Selected save
+    McView& sv = mcv_get(m, g_mcm.card);
+    const int owner = sv.card.valid ? sv.card.block_owner[g_mcm.block] : -1;
+    const LmcSave* save = owner >= 0 ? &sv.card.saves[owner] : nullptr;
+
+    // Title box (top, full width), like the PS1 screen.
+    const float tb_y = wp.y + px(78);
+    const float tb_h = px(52);
+    dl->AddRectFilled(ImVec2(wp.x + pad, tb_y), ImVec2(wp.x + ws.x - pad, tb_y + tb_h), IM_COL32(6, 12, 50, 210), px(10));
+    dl->AddRect(ImVec2(wp.x + pad, tb_y), ImVec2(wp.x + ws.x - pad, tb_y + tb_h), IM_COL32(110, 150, 240, 160), px(10), 0, px(1.5f));
+    mc_text_centered(dl, font, fs * 1.35f, ImVec2(wp.x + ws.x * 0.5f, tb_y + tb_h * 0.5f),
+                     save ? IM_COL32(255, 255, 255, 255) : IM_COL32(140, 160, 210, 255),
+                     save ? save->title : (sv.card.valid ? "BLOCO LIVRE" : "SEM MEMORY CARD"));
+
+    // Board: card 1 | info | card 2
+    const float board_y = tb_y + tb_h + px(18);
+    const float foot_h = px(70);
+    const float board_h = wp.y + ws.y - foot_h - board_y;
+    const float info_w = ws.x * 0.26f;
+    const float card_w = (ws.x - pad * 4 - info_w) * 0.5f;
+    mc_draw_card_grid(m, 0, ImVec2(wp.x + pad, board_y), card_w, board_h);
+    mc_draw_card_grid(m, 1, ImVec2(wp.x + ws.x - pad - card_w, board_y), card_w, board_h);
+
+    // Info column
+    {
+        const float ix = wp.x + pad * 2 + card_w;
+        dl->AddRectFilled(ImVec2(ix, board_y), ImVec2(ix + info_w, board_y + board_h), IM_COL32(8, 14, 56, 170), px(14));
+        dl->AddRect(ImVec2(ix, board_y), ImVec2(ix + info_w, board_y + board_h), IM_COL32(90, 120, 200, 110), px(14), 0, px(1.5f));
+        float y = board_y + px(18);
+        const float big = info_w * 0.42f > px(110) ? px(110) : info_w * 0.42f;
+        const ImVec2 imn(ix + (info_w - big) * 0.5f, y);
+        dl->AddRectFilled(imn, ImVec2(imn.x + big, imn.y + big), IM_COL32(20, 32, 100, 220), px(12));
+        if (save) mc_draw_icon(dl, sv, owner, ImVec2(imn.x + big * 0.1f, imn.y + big * 0.1f),
+                               ImVec2(imn.x + big * 0.9f, imn.y + big * 0.9f), 1.0f);
+        dl->AddRect(imn, ImVec2(imn.x + big, imn.y + big), IM_COL32(120, 160, 250, 160), px(12), 0, px(1.5f));
+        y += big + px(16);
+        auto line = [&](const char* k, const char* val) {
+            dl->AddText(font, fs * 0.9f, ImVec2(ix + px(16), y), IM_COL32(140, 165, 225, 255), k);
+            y += fs * 1.05f;
+            dl->AddText(font, fs, ImVec2(ix + px(16), y), IM_COL32(240, 244, 255, 255), val, nullptr);
+            y += fs * 1.55f;
+        };
+        char tmp[64];
+        snprintf(tmp, sizeof(tmp), "Memory Card %d  -  bloco %d", g_mcm.card + 1, g_mcm.block + 1);
+        line("POSIÇÃO", tmp);
+        if (save) {
+            line("CÓDIGO DO JOGO", save->product[0] ? save->product : "-");
+            line("REGIÃO", save->region[0] ? save->region : "-");
+            snprintf(tmp, sizeof(tmp), "%d bloco%s", save->num_blocks, save->num_blocks == 1 ? "" : "s");
+            line("TAMANHO", tmp);
+        } else {
+            line("ESTADO", sv.card.valid ? "livre" : "sem memory card");
+        }
+    }
+
+    // Footer: actions
+    {
+        const float by = wp.y + ws.y - foot_h + px(14);
+        const float bh = px(40);
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.20f, 0.55f, 0.95f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.32f, 0.78f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.28f, 0.42f, 0.90f, 1.0f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, px(10));
+        const int other = 1 - g_mcm.card;
+        char copy_lbl[48];
+        snprintf(copy_lbl, sizeof(copy_lbl), g_mcm.card == 0 ? "Copiar para o card 2  >>" : "<<  Copiar para o card 1");
+        ImGui::SetCursorScreenPos(ImVec2(wp.x + pad, by));
+        ImGui::BeginDisabled(!save);
+        if (ImGui::Button(copy_lbl, ImVec2(px(260), bh))) {
+            char err[160] = {};
+            if (!m->s.memcard_path[other][0]) mc_note("O outro memory card não está configurado.", true);
+            else if (lmc_copy(m->s.memcard_path[g_mcm.card], owner, m->s.memcard_path[other], err, sizeof(err))) {
+                mc_note("Save copiado. Backup do card anterior: .bak ao lado do arquivo.", false);
+                mcv_get(m, other, true);
+            } else mc_note(err, true);
+        }
+        ImGui::SameLine(0, px(12));
+        if (ImGui::Button("Apagar save", ImVec2(px(170), bh))) ImGui::OpenPopup("Apagar este save?");
+        ImGui::EndDisabled();
+        ImGui::SetCursorScreenPos(ImVec2(wp.x + ws.x - pad - px(150), by));
+        if (ImGui::Button("Fechar", ImVec2(px(150), bh)) || ImGui::IsKeyPressed(ImGuiKey_Escape) ||
+            ImGui::IsKeyPressed(ImGuiKey_GamepadFaceRight))
+            ImGui::CloseCurrentPopup();
+        ImGui::PopStyleVar();
+        ImGui::PopStyleColor(3);
+
+        if (g_mcm.msg[0] && t < g_mcm.msg_until) {
+            const ImVec2 ms = font->CalcTextSizeA(fs, FLT_MAX, 0, g_mcm.msg);
+            dl->AddText(font, fs, ImVec2(wp.x + (ws.x - ms.x) * 0.5f, by + (bh - ms.y) * 0.5f),
+                        g_mcm.msg_bad ? IM_COL32(255, 170, 90, 255) : IM_COL32(140, 240, 170, 255), g_mcm.msg);
+        }
+    }
+
+    // Delete confirmation (nested modal).
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("Apagar este save?", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+        ImGui::Text("Apagar \"%s\" do Memory Card %d?", save ? save->title : "?", g_mcm.card + 1);
+        ImGui::TextDisabled("Antes de apagar, uma cópia do card inteiro é salva como .bak ao lado do arquivo.");
+        ImGui::Dummy(ImVec2(0, px(6)));
+        if (ImGui::Button("Apagar", ImVec2(px(140), px(32))) && save) {
+            char err[160] = {};
+            if (lmc_delete(m->s.memcard_path[g_mcm.card], owner, err, sizeof(err))) {
+                mc_note("Save apagado.", false);
+                mcv_get(m, g_mcm.card, true);
+            } else mc_note(err, true);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancelar", ImVec2(px(140), px(32)))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    ImGui::EndPopup();
+}
+
+// ---- collection cover carousel ---------------------------------------------
+struct CoverTex {
+    std::string     path;
+    LauncherTexture color{}, gray{};
+    double          retry_at = -1.0;
+};
+CoverTex g_cover[8];
+int      g_car_sel = 0;
+float    g_car_pos = 0.0f;
+double   g_car_last = 0.0;
+
+static void cover_update(LauncherModel* m, int i) {
+    CoverTex& c = g_cover[i];
+    std::string p;
+    if (m->game_disc_cover) {
+        const char* s = m->game_disc_cover(i);
+        if (s && s[0]) p = s;
+    }
+    if (p.empty() && i == 0)
+        p = asset(m->boxart_path && m->boxart_path[0] ? m->boxart_path : "assets/img/boxart.tga");
+    const double now = ImGui::GetTime();
+    if (p == c.path && (c.color.id || now < c.retry_at)) return;
+    launcher_texture_free(&c.color);
+    launcher_texture_free(&c.gray);
+    c.path = p;
+    c.retry_at = now + 3.0;   // a cover dropped in later shows up by itself
+    if (p.empty()) return;
+    c.color = launcher_texture_load(p.c_str());
+    if (c.color.id) c.gray = launcher_texture_load_gray(p.c_str(), 0.55f);
+}
+
+// "PlayStation - Americano (EUA)  -  Mega Man 8 (USA) (SLUS-00453)"
+static void disc_name_parts(const char* name, std::string& platform, std::string& title) {
+    const std::string s = name ? name : "";
+    const size_t k = s.find("  -  ");
+    platform = k == std::string::npos ? s : s.substr(0, k);
+    title = k == std::string::npos ? std::string() : s.substr(k + 5);
+}
+
+static void cover_placeholder(ImDrawList* dl, ImVec2 mn, ImVec2 mx, const char* name, bool present, float alpha) {
+    std::string platform, title;
+    disc_name_parts(name, platform, title);
+    const bool saturn = platform.find("Saturn") != std::string::npos;
+    const int a = (int)(alpha * 255.0f);
+    const ImU32 top = present ? (saturn ? IM_COL32(30, 40, 90, a) : IM_COL32(40, 44, 60, a)) : IM_COL32(48, 48, 52, a);
+    const ImU32 bot = present ? (saturn ? IM_COL32(8, 12, 36, a) : IM_COL32(12, 14, 22, a)) : IM_COL32(20, 20, 22, a);
+    dl->AddRectFilledMultiColor(mn, mx, top, top, bot, bot);
+    const float w = mx.x - mn.x, h = mx.y - mn.y;
+    // spine band with the platform name
+    const float band = h * 0.11f;
+    dl->AddRectFilled(mn, ImVec2(mx.x, mn.y + band),
+                      present ? (saturn ? IM_COL32(20, 60, 170, a) : IM_COL32(15, 15, 18, a)) : IM_COL32(60, 60, 64, a));
+    ImFont* f = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize();
+    const std::string plat = saturn ? "SEGA SATURN" : "PlayStation";
+    const ImVec2 ps = f->CalcTextSizeA(fs * 0.9f, FLT_MAX, 0, plat.c_str());
+    dl->AddText(f, fs * 0.9f, ImVec2(mn.x + (w - ps.x) * 0.5f, mn.y + (band - ps.y) * 0.5f), IM_COL32(235, 235, 240, a), plat.c_str());
+    // disc
+    const ImVec2 c(mn.x + w * 0.5f, mn.y + h * 0.48f);
+    const float r = w * 0.30f;
+    dl->AddCircleFilled(c, r, present ? IM_COL32(170, 180, 200, a) : IM_COL32(110, 110, 114, a), 48);
+    dl->AddCircle(c, r * 0.98f, IM_COL32(255, 255, 255, a / 3), 48, 1.5f);
+    dl->AddCircleFilled(c, r * 0.22f, bot, 32);
+    // title, wrapped
+    const std::string t = title.empty() ? platform : title;
+    const float wrap = w * 0.86f;
+    const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, wrap, t.c_str());
+    dl->AddText(f, fs, ImVec2(mn.x + (w - ts.x) * 0.5f, mx.y - h * 0.06f - ts.y), IM_COL32(230, 232, 240, a),
+                t.c_str(), nullptr, wrap);
+}
+
+static void draw_cover_carousel(LauncherModel* m, const LauncherTheme& th, float box_h, float availw) {
+    int n = m->num_game_discs;
+    if (n > 8) n = 8;
+    for (int i = 0; i < n; ++i) cover_update(m, i);
+    if (g_car_sel >= n) g_car_sel = 0;
+
+    ImGuiIO& io = ImGui::GetIO();
+    const double now = ImGui::GetTime();
+    const float H = px(box_h);
+    const ImVec2 p0 = ImGui::GetCursorScreenPos();
+    const float cx = p0.x + availw * 0.5f;
+    const float base_w = H * 0.72f;
+    const float spacing = availw * 0.30f;
+
+    ImGui::InvisibleButton("##cover_carousel", ImVec2(availw, H));
+    const bool hovered = ImGui::IsItemHovered();
+    if (ImGui::IsItemClicked() && n > 1) {
+        const float mx = io.MousePos.x;
+        if (mx < cx - base_w * 0.5f) g_car_sel = (g_car_sel + n - 1) % n;
+        else if (mx > cx + base_w * 0.5f) g_car_sel = (g_car_sel + 1) % n;
+        g_car_last = now;
+    }
+    if (hovered && io.MouseWheel != 0.0f && n > 1) {
+        g_car_sel = (g_car_sel + (io.MouseWheel < 0 ? 1 : n - 1)) % n;
+        g_car_last = now;
+    }
+    if (!hovered && n > 1 && now - g_car_last > 6.0) {
+        g_car_sel = (g_car_sel + 1) % n;
+        g_car_last = now;
+    }
+    float k = io.DeltaTime * 9.0f;
+    if (k > 1.0f) k = 1.0f;
+    g_car_pos += ((float)g_car_sel - g_car_pos) * k;
+
+    // draw back to front
+    int order[8];
+    for (int i = 0; i < n; ++i) order[i] = i;
+    std::sort(order, order + n, [](int a, int b) {
+        return fabsf(a - g_car_pos) > fabsf(b - g_car_pos);
+    });
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (int oi = 0; oi < n; ++oi) {
+        const int i = order[oi];
+        const float d = (float)i - g_car_pos;
+        const float ad = fabsf(d);
+        if (ad > 1.7f) continue;
+        const float e = ad > 1.0f ? 1.0f : ad;
+        const float s = 1.0f - 0.26f * e;
+        const float alpha = 1.0f - 0.40f * e;
+        const bool present = m->game_disc_state(i) == 1;
+        const CoverTex& c = g_cover[i];
+        const LauncherTexture& tex = present ? c.color : c.gray;
+        float h = H * s;
+        float w = (tex.id && tex.h > 0) ? h * (float)tex.w / (float)tex.h : base_w * s;
+        if (w > availw * 0.62f) { h *= availw * 0.62f / w; w = availw * 0.62f; }
+        const float x = cx + d * spacing - w * 0.5f;
+        const float y = p0.y + (H - h) * 0.5f;
+        const ImVec2 mn(x, y), mx(x + w, y + h);
+        dl->AddRectFilled(ImVec2(mn.x + px(6), mn.y + px(8)), ImVec2(mx.x + px(6), mx.y + px(8)),
+                          IM_COL32(0, 0, 0, (int)(90 * alpha)), px(6));
+        if (tex.id)
+            dl->AddImageRounded(tid(tex), mn, mx, ImVec2(0, 0), ImVec2(1, 1),
+                                IM_COL32(255, 255, 255, (int)(255 * alpha)), px(5));
+        else
+            cover_placeholder(dl, mn, mx, m->game_disc_name(i), present, alpha);
+        if (ad > 0.5f)   // side covers sit a little behind
+            dl->AddRectFilled(mn, mx, IM_COL32(8, 10, 20, (int)(70 * e)), px(5));
+        dl->AddRect(mn, mx, present ? imcol(th.border) : IM_COL32(120, 120, 120, (int)(160 * alpha)), px(5), 0, px(1));
+        if (!present) {
+            const char* tag = m->game_disc_state(i) == 2 ? "COPIANDO..." : "SEM DISCO";
+            ImFont* f = ImGui::GetFont();
+            const float fs = ImGui::GetFontSize() * 0.85f;
+            const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, tag);
+            const ImVec2 bmn(mn.x + (w - ts.x) * 0.5f - px(10), mn.y + h * 0.5f - ts.y * 0.5f - px(5));
+            const ImVec2 bmx(bmn.x + ts.x + px(20), bmn.y + ts.y + px(10));
+            dl->AddRectFilled(bmn, bmx, IM_COL32(20, 20, 24, (int)(220 * alpha)), px(6));
+            dl->AddRect(bmn, bmx, IM_COL32(255, 190, 90, (int)(220 * alpha)), px(6), 0, px(1));
+            dl->AddText(f, fs, ImVec2(bmn.x + px(10), bmn.y + px(5)), IM_COL32(255, 200, 110, (int)(255 * alpha)), tag);
+        }
+    }
+
+    // arrows (when there is more than one disc)
+    if (n > 1) {
+        const float r = px(13);
+        const float yy = p0.y + H * 0.5f;
+        for (int side = 0; side < 2; ++side) {
+            const float xx = side ? p0.x + availw - r - px(2) : p0.x + r + px(2);
+            dl->AddCircleFilled(ImVec2(xx, yy), r, IM_COL32(0, 0, 0, hovered ? 150 : 90), 24);
+            const float q = r * 0.45f, dir = side ? 1.0f : -1.0f;
+            dl->AddTriangleFilled(ImVec2(xx + dir * q, yy), ImVec2(xx - dir * q * 0.6f, yy - q),
+                                  ImVec2(xx - dir * q * 0.6f, yy + q), IM_COL32(255, 255, 255, hovered ? 230 : 150));
+        }
+    }
+
+    // dots + caption
+    ImGui::Dummy(ImVec2(0, px(6)));
+    {
+        const ImVec2 dp = ImGui::GetCursorScreenPos();
+        const float dr = px(4), dg = px(12);
+        const float total = n * dr * 2 + (n - 1) * (dg - dr * 2);
+        for (int i = 0; i < n; ++i) {
+            const ImVec2 c(dp.x + (availw - total) * 0.5f + dr + i * dg, dp.y + dr);
+            if (i == g_car_sel) dl->AddCircleFilled(c, dr, imcol(th.accent), 16);
+            else dl->AddCircle(c, dr, imcol(th.text_muted), 16, 1.2f);
+        }
+        ImGui::Dummy(ImVec2(availw, dr * 2 + px(4)));
+    }
+    {
+        std::string platform, title;
+        disc_name_parts(m->game_disc_name(g_car_sel), platform, title);
+        const int st = m->game_disc_state(g_car_sel);
+        const float tw = ImGui::CalcTextSize(platform.c_str()).x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availw - tw) * 0.5f);
+        ImGui::TextUnformatted(platform.c_str());
+        const char* stat = m->game_disc_status(g_car_sel);
+        const float sw = ImGui::CalcTextSize(stat).x;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availw - sw) * 0.5f);
+        ImGui::TextColored(st == 1 ? col(th.good) : (st == 2 ? col(th.text_muted) : col(th.warn)), "%s", stat);
+    }
+}
+
 void draw_game_panel(LauncherModel* m, const LauncherTheme& th, bool fill_h = false) {
     if (!begin_panel("game", 0, fill_h)) { end_panel(); return; }
     // No "GAME" eyebrow: the box art itself tells the user this is the game.
@@ -1141,7 +1664,13 @@ void draw_game_panel(LauncherModel* m, const LauncherTheme& th, bool fill_h = fa
         float art_h = ImGui::GetContentRegionAvail().y - reserve;
         if (art_h > px(368.0f)) art_h = px(368.0f);   // allow a larger hero box art (~15% bigger than before)
         if (art_h < px(248.0f)) art_h = px(248.0f);   // keep it big enough to balance the side column
-        hero_boxart_centered(g_boxart, art_h, availw);
+        if (m->num_game_discs > 0) {
+            art_h -= 56.0f;            // dots + platform + status lines under the carousel
+            if (art_h < 220.0f) art_h = 220.0f;
+            draw_cover_carousel(m, th, art_h, availw);
+        } else {
+            hero_boxart_centered(g_boxart, art_h, availw);
+        }
     }
     ImGui::Dummy(ImVec2(0, px(10)));
 
@@ -1174,13 +1703,14 @@ void draw_game_panel(LauncherModel* m, const LauncherTheme& th, bool fill_h = fa
         // one — an empty value would render a bare "Region" label with nothing
         // beside it, which reads as a bug.
         if (!disc_verdict && m->region[0])
-            kv_row("Region", m->region, th, false, false);
-        kv_row("File",   m->rom_file, th, false, false);
+            kv_row("Região", m->region, th, false, false);
+        kv_row("Arquivo",m->rom_file, th, false, false);
         ImGui::EndTable();
     }
     ImGui::Dummy(ImVec2(0, px(12)));
     char change_label[32];
-    snprintf(change_label, sizeof(change_label), "Change %s", noun);
+    if (strcmp(noun, "Disc") == 0) snprintf(change_label, sizeof(change_label), "Trocar disco");
+    else snprintf(change_label, sizeof(change_label), "Change %s", noun);
     if (ImGui::Button(change_label, ImVec2(availw, px(34)))) {
         // Native file dialog filter comes from the active console's
         // SystemProfile.rom_filter — never a hardcoded per-system set. Every
@@ -1413,7 +1943,7 @@ void draw_memcard_slot(LauncherModel* m, const LauncherTheme& th, int slot) {
     if (g_save_fill_h) {
         const float avail_h = ImGui::GetContentRegionAvail().y;
         // Grid + gap + Browse/New + bottom pad — keep buttons clear of the frame.
-        img_h = avail_h - px(110.0f);
+        img_h = avail_h - px(146.0f);
         const float img_h_by_w = (0.50f * slotw) * (164.0f / 148.0f);  // cap width ~half
         if (img_h > img_h_by_w) img_h = img_h_by_w;
         if (img_h < px(92.0f))  img_h = px(92.0f);
@@ -1429,6 +1959,12 @@ void draw_memcard_slot(LauncherModel* m, const LauncherTheme& th, int slot) {
     } else {
         ImGui::Dummy(ImVec2(iw, ih));
     }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImGui::SetTooltip("Abrir o gerenciador do memory card");
+    }
+    if (ImGui::IsItemClicked()) mc_open_manager(slot);
+    McView& mcv = mcv_get(m, slot);
 
     const float rc_x    = start_x + iw + px(14.0f);   // right column x
     const float frame_h = ImGui::GetFrameHeight();
@@ -1439,7 +1975,7 @@ void draw_memcard_slot(LauncherModel* m, const LauncherTheme& th, int slot) {
     {
         ImGui::SetCursorPos(ImVec2(rc_x, top_y));
         bool enabled_box = enabled;
-        if (ImGui::Checkbox("Enabled", &enabled_box))
+        if (ImGui::Checkbox("Ativo", &enabled_box))
             launcher_model_toggle_memcard(m, slot);
     }
 
@@ -1456,7 +1992,17 @@ void draw_memcard_slot(LauncherModel* m, const LauncherTheme& th, int slot) {
     ImGui::PopStyleColor();
 
     // Block count under the name.
-    char cap[16]; snprintf(cap, sizeof(cap), "%d / 15", used_count);
+    if (mcv.card.valid) {
+        used = 0;
+        used_count = 0;
+        for (int i = 0; i < 15; ++i)
+            if (mcv.card.block_owner[i] >= 0) { used |= (uint16_t)(1u << i); ++used_count; }
+    }
+    char cap[48];
+    if (mcv.card.valid)
+        snprintf(cap, sizeof(cap), "%d save%s  -  %d / 15", mcv.card.num_saves, mcv.card.num_saves == 1 ? "" : "s", used_count);
+    else
+        snprintf(cap, sizeof(cap), "%d / 15", used_count);
     ImGui::SetCursorPos(ImVec2(rc_x, top_y + frame_h + px(10.0f) + line_h + px(6.0f)));
     ImGui::PushStyleColor(ImGuiCol_Text, col(th.text_muted));
     ImGui::TextUnformatted(cap);
@@ -1472,28 +2018,50 @@ void draw_memcard_slot(LauncherModel* m, const LauncherTheme& th, int slot) {
 
     // 15-block usage grid, full width under the image.
     {
-        const int   kB   = 15;
+        // Real save icons (animated) when the card could be read; the plain
+        // used/free squares otherwise. Clicking opens the memory-card manager.
+        // Two rows (8 + 7) so the icons are big enough to read.
+        const int   kB   = 15, kCols = 8;
         const float bgap = px(4.0f);
         const float availw = ImGui::GetContentRegionAvail().x;
-        float cell = (availw - bgap * (kB - 1)) / (float)kB;
-        if (cell > px(18.0f)) cell = px(18.0f);
+        float cell = (availw - bgap * (kCols - 1)) / (float)kCols;
+        if (cell > px(30.0f)) cell = px(30.0f);
         ImDrawList* dl = ImGui::GetWindowDrawList();
         const ImVec2 p0 = ImGui::GetCursorScreenPos();
         for (int i = 0; i < kB; ++i) {
             const bool onb = (used & (1u << i)) != 0;
-            const ImVec2 mn(p0.x + i * (cell + bgap), p0.y);
+            const ImVec2 mn(p0.x + (i % kCols) * (cell + bgap), p0.y + (i / kCols) * (cell + bgap));
             const ImVec2 mx(mn.x + cell, mn.y + cell);
-            dl->AddRectFilled(mn, mx, imcol(onb ? th.accent : th.control), px(3.0f));
-            dl->AddRect(mn, mx, imcol(th.border), px(3.0f), 0, px(1.0f));
+            const int owner = mcv.card.valid ? mcv.card.block_owner[i] : -1;
+            if (owner >= 0) {
+                dl->AddRectFilled(mn, mx, IM_COL32(24, 38, 104, 255), px(4.0f));
+                const bool first = mcv.card.saves[owner].first_block == i;
+                mc_draw_icon(dl, mcv, owner, ImVec2(mn.x + 2, mn.y + 2), ImVec2(mx.x - 2, mx.y - 2), first ? 1.0f : 0.35f);
+                dl->AddRect(mn, mx, IM_COL32(110, 150, 240, 200), px(4.0f), 0, px(1.0f));
+            } else {
+                dl->AddRectFilled(mn, mx, imcol(onb ? th.accent : th.control), px(4.0f));
+                dl->AddRect(mn, mx, imcol(th.border), px(4.0f), 0, px(1.0f));
+            }
         }
-        ImGui::Dummy(ImVec2(cell * kB + bgap * (kB - 1), cell));
+        ImGui::InvisibleButton("##mcgrid", ImVec2(cell * kCols + bgap * (kCols - 1), cell * 2 + bgap));
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            const ImVec2 mp = ImGui::GetIO().MousePos;
+            const int bi = (int)((mp.y - p0.y) / (cell + bgap)) * kCols + (int)((mp.x - p0.x) / (cell + bgap));
+            const int owner = (bi >= 0 && bi < kB && mcv.card.valid) ? mcv.card.block_owner[bi] : -1;
+            if (owner >= 0) ImGui::SetTooltip("%s", mcv.card.saves[owner].title);
+            else ImGui::SetTooltip("Bloco livre - clique para abrir o gerenciador");
+        }
+        if (ImGui::IsItemClicked()) mc_open_manager(slot);
     }
 
     // Gap above Browse/New only — bottom inset is Child WindowPadding (same as
     // the top). An extra bottom Dummy doubled the pad and looked top-heavy.
     static const char* kCardPatterns[] = { "*.mcd", "*.mcr", "*.mc" };
     const float cw = ImGui::GetContentRegionAvail().x;
-    const float bw = (cw - px(th.spacing_sm)) * 0.5f;
+    const float bw_all = cw - 2 * px(th.spacing_sm);
+    const float bw_mgr = bw_all * 0.38f;              // "Gerenciar" is the longest label
+    const float bw = (bw_all - bw_mgr) * 0.5f;
     const float btn_h = px(32.0f);
     const float btn_gap = px(16.0f);
     if (g_save_fill_h) {
@@ -1502,14 +2070,19 @@ void draw_memcard_slot(LauncherModel* m, const LauncherTheme& th, int slot) {
     } else {
         ImGui::Dummy(ImVec2(0, btn_gap));
     }
-    if (ImGui::Button("Browse", ImVec2(bw, btn_h))) {
+    ImGui::PushStyleColor(ImGuiCol_Button, col(th.accent_dim));
+    if (ImGui::Button("Gerenciar", ImVec2(bw_mgr, btn_h))) mc_open_manager(slot);
+    ImGui::PopStyleColor();
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Ver, copiar e apagar os saves deste memory card");
+    ImGui::SameLine(0, px(th.spacing_sm));
+    if (ImGui::Button("Abrir", ImVec2(bw, btn_h))) {
         char buf[512];
         if (launcher_pick_file("Select memory card image", kCardPatterns, 3,
                                "PS1 memory card (.mcd .mcr .mc)", buf, sizeof(buf)))
             launcher_model_set_memcard_path(m, slot, buf);
     }
     ImGui::SameLine(0, px(th.spacing_sm));
-    if (ImGui::Button("New", ImVec2(bw, btn_h))) {
+    if (ImGui::Button("Novo", ImVec2(bw, btn_h))) {
         char buf[512];
         // "New" picks a DESTINATION (the file need not exist yet — a save
         // dialog, not the open dialog Browse uses), then writes a real,
@@ -2024,9 +2597,9 @@ void draw_player_panel(LauncherModel* m, const LauncherTheme& th, int p, float w
     char eb[40];
     if (p == 0 && m->netplay_supported) {
         const int seat = np_guess_local_seat(m);
-        snprintf(eb, sizeof(eb), "PLAYER %d / NETPLAY", seat + 1);
+        snprintf(eb, sizeof(eb), "JOGADOR %d / ONLINE", seat + 1);
     } else {
-        snprintf(eb, sizeof(eb), "PLAYER %d", p + 1);
+        snprintf(eb, sizeof(eb), "JOGADOR %d", p + 1);
     }
 
     if (!begin_panel(id, w, false)) { end_panel(); return; }
@@ -2082,10 +2655,10 @@ void draw_player_panel(LauncherModel* m, const LauncherTheme& th, int p, float w
         const float gap  = px(th.spacing_sm);
         const float half = (cw - gap) * 0.5f;
         const float btnh = px(32);
-        if (ImGui::Button("Configure", ImVec2(half, btnh))) launcher_model_open_config(m, p);
+        if (ImGui::Button("Configurar", ImVec2(half, btnh))) launcher_model_open_config(m, p);
         ImGui::SameLine(0, gap);
         const bool on = m->s.player_src[p] != 0;
-        const char* st = on ? "connected" : "not assigned";
+        const char* st = on ? "conectado" : "sem controle";
         const float sw = px(10) + px(8) + ImGui::CalcTextSize(st).x;
         // center the dot+label within the right half, vertically on the button
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (half - sw) * 0.5f);
@@ -6823,7 +7396,7 @@ void draw_footer(LauncherModel* m, const LauncherTheme& th, float footer_h) {
     if (m->view == LNG_VIEW_DASHBOARD) {
         bool skip = m->s.skip_launcher != 0;
         ImGui::SetCursorScreenPos(ImVec2(origin.x, cta_y + (play_h - ImGui::GetFrameHeight()) * 0.5f));
-        if (ImGui::Checkbox("Skip launcher on boot", &skip))
+        if (ImGui::Checkbox("Pular esta tela da próxima vez", &skip))
             launcher_model_request_skip_toggle(m);
     } else if (m->view == LNG_VIEW_SETTINGS &&
                launcher_model_can_restore_defaults(m)) {
@@ -6952,7 +7525,7 @@ void draw_footer(LauncherModel* m, const LauncherTheme& th, float footer_h) {
     const bool can_play = launcher_model_can_launch(m);
     const bool bios_block = launcher_model_bios_blocks_play(m);
     const bool play_enabled = can_play || bios_block;
-    if (neon_cta("##play", "PLAY", ImVec2(play_w, play_h), play_enabled)) {
+    if (neon_cta("##play", "JOGAR", ImVec2(play_w, play_h), play_enabled)) {
         /* Prefer mismatch prompt over launch even if can_play races true. */
         if (bios_block)
             launcher_model_bios_play_prompt(m);
@@ -7915,6 +8488,14 @@ void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logic
             ImGui::PushStyleColor(ImGuiCol_Text, col(th.text_muted));
             ImGui::TextUnformatted(m->platform);
             ImGui::PopStyleColor();
+            if (m->num_game_discs > 0) {   // "PLAYSTATION   COLETÂNEA  1 de 3 discos"
+                int have = 0;
+                for (int i = 0; i < m->num_game_discs; ++i) have += m->game_disc_state(i) == 1;
+                ImGui::SameLine(0, px(14));
+                ImGui::PushStyleColor(ImGuiCol_Text, col(th.accent));
+                ImGui::Text("COLETÂNEA  %d de %d discos", have, m->num_game_discs);
+                ImGui::PopStyleColor();
+            }
         }
     ImGui::EndGroup();
     {   // right-aligned top-level navigation
@@ -7927,10 +8508,10 @@ void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logic
             const int count = 1 + (m->mods ? 1 : 0) +
                               (m->has_assist_tools ? 1 : 0) +
                               ((m->credits_text && m->credits_text[0]) ? 1 : 0);
-            const float w = px(110.0f);
+            const float w = px(124.0f);
             const float total = w * count + gap * (count - 1);
             ImGui::SetCursorPos(ImVec2(right - total, y));
-            if (ImGui::Button("Settings", ImVec2(w, px(34))))
+            if (ImGui::Button("Configurações", ImVec2(w, px(34))))
                 launcher_model_set_view(m, LNG_VIEW_SETTINGS);
             if (m->mods) {
                 ImGui::SameLine(0, gap);
@@ -7948,7 +8529,7 @@ void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logic
                     launcher_model_set_view(m, LNG_VIEW_CREDITS);
             }
         } else {
-            const float w = px(110.0f);
+            const float w = px(124.0f);
             const float name_w = px(170.0f);
             if (m->view == LNG_VIEW_NETPLAY && m->netplay_supported) {
                 ImGui::SetCursorPos(ImVec2(right - w - name_w - gap, y));
@@ -8003,6 +8584,7 @@ void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logic
     draw_footer(m, th, footer_h);
     draw_setup_wizard_modal(m, th);
     draw_game_discs_modal(m, th);
+    draw_memcard_manager(m, th);
     draw_bios_confirm_modal(m, th);
     draw_bios_play_modal(m, th);
     draw_pgo_confirm_modal(m, th);

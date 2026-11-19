@@ -139,6 +139,7 @@ function(recomp_target_launcher_ui TGT)
         ${RUI_SRC}/common/launcher_gl.c
         ${RUI_SRC}/common/launcher_input.c
         ${RUI_SRC}/common/launcher_files.c
+        ${RUI_SRC}/common/launcher_memcard.c   # PS1 memory card reader (save icons/titles)
         ${RUI_SRC}/common/launcher_debug.c
         ${RUI_SRC}/common/launcher_binds.c
         ${RUI_SRC}/common/launcher_udp_port.c  # host-lobby UDP port probe / auto-pick
