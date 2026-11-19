@@ -461,6 +461,7 @@ struct RecompLauncherCSettings {
     int  player_src[RECOMP_LAUNCHER_MAX_PLAYERS];  // 0 none, 1 keyboard, 2 gamepad
     int  deadzone[RECOMP_LAUNCHER_MAX_PLAYERS];    // 0..100
     int  skip_launcher;     // bool: boot straight to the game next time
+    int  hide_showcase;     // bool: sem a vitrine de fundos nítidos na tela larga (19/11/2026)
     int  msu1_enabled;      // bool
     char msu1_dir[512];
     int  pad_mode[RECOMP_LAUNCHER_MAX_PLAYERS];    // per player: 0=Hybrid, 1=Analog(DualShock), 2=D-Pad(digital)

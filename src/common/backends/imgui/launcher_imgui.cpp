@@ -2827,7 +2827,7 @@ static void draw_ctrl_icon(ImDrawList* dl, ImVec2 c, float w, float h, int kind)
 // pasta não vai para o GitHub). Aparecem grandes ao lado do controle padrão: coloridas com o
 // controle ligado, em preto e branco quando ele se desconecta. Sem os arquivos, fica o ícone
 // desenhado (draw_ctrl_icon).
-enum { CA_XSERIES, CA_X360, CA_PS5, CA_SWITCH, CA_N };
+enum { CA_XSERIES, CA_X360, CA_PS5, CA_SWITCH, CA_PS1, CA_N };
 static struct {
     LauncherTexture color[CA_N];
     LauncherTexture gray[CA_N];
@@ -2841,7 +2841,7 @@ static void ctrl_art_load(LauncherModel* m) {
     if (!d || !d[0]) return;
     namespace fs = std::filesystem;
     const fs::path dir = fs::u8path(d).parent_path() / "controles";
-    static const char* names[CA_N] = { "xbox-series.png", "xbox-360.png", "ps5.png", "switch-pro.png" };
+    static const char* names[CA_N] = { "xbox-series.png", "xbox-360.png", "ps5.png", "switch-pro.png", "ps1.png" };
     for (int i = 0; i < CA_N; ++i) {
         const auto p8 = (dir / names[i]).u8string();
         const std::string path(p8.begin(), p8.end());
@@ -2918,8 +2918,11 @@ void draw_player_panel(LauncherModel* m, const LauncherTheme& th, int p, float w
         // original PSX pad whenever the saved mode happened to be digital.
         const bool digital_only = !m->pad_mode_selectable && m->locked_pad_mode == 2;
         const bool digital = has_swap_art && digital_only;
-        const LauncherTexture& art = has_swap_art
-            ? (digital ? g_pad_digital : g_pad_analog) : g_pad;
+        // 19/11/2026 (Samuel): o controle clássico com o tema do MM8 (game-assets/controles/ps1.png)
+        // no lugar do controle cinza padrão, quando existe
+        ctrl_art_load(m);
+        const LauncherTexture& art = g_ctrl_art.color[CA_PS1].id ? g_ctrl_art.color[CA_PS1]
+            : has_swap_art ? (digital ? g_pad_digital : g_pad_analog) : g_pad;
         // Center on the FITTED width so a near-square pad (N64) or a portrait
         // handheld (GB/GBC) sits centered, not left-shifted by the landscape
         // box's spare width.
@@ -2930,7 +2933,7 @@ void draw_player_panel(LauncherModel* m, const LauncherTheme& th, int p, float w
         const int ai = ctrl_art_index(m, p, kind);
         const bool has_art = ai >= 0 && g_ctrl_art.color[ai].id && g_ctrl_art.color[ai].w > 0;
         const bool live = ctrl_live(m, p);
-        float fw = px(110), fh = px(72);
+        float fw = px(130), fh = px(94);
         if (art.id && art.w > 0 && art.h > 0) {
             const float s = (fw / art.w < fh / art.h) ? fw / (float)art.w : fh / (float)art.h;
             fw = art.w * s; fh = art.h * s;
@@ -3316,6 +3319,27 @@ bool video_card_grows(const LauncherModel* m) {
     return false;
 }
 
+// Estado da função Widescreen do mod do MM8 na página Mods: 1 ligada, 0 desligada,
+// -1 sem o mod (a linha PROPORCAO fica como as outras).
+static int widescreen_feature_state(LauncherModel* m) {
+    const auto* mods = m ? m->mods : nullptr;
+    if (!mods || !mods->feature_count || !mods->feature_get) return -1;
+    const int n = mods->feature_count(mods->ctx);
+    for (int i = 0; i < n; ++i) {
+        RecompLauncherCModFeature f{};
+        if (!mods->feature_get(mods->ctx, i, &f)) continue;
+        if (!std::strcmp(f.package_id, "mm8.enhancement.widescreen") && !std::strcmp(f.id, "widescreen"))
+            return f.enabled ? 1 : 0;
+    }
+    return -1;
+}
+
+static void widescreen_feature_enable(LauncherModel* m) {
+    const auto* mods = m ? m->mods : nullptr;
+    if (!mods || !mods->feature_enable) return;
+    mods->feature_enable(mods->ctx, "mm8.enhancement.widescreen", "widescreen", 1);
+}
+
 void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
     eyebrow("DISPLAY");
 
@@ -3558,6 +3582,16 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
         }
     }
 
+    // 19/11/2026 (pedido do Samuel): a vitrine de fundos nítidos da tela larga é opcional
+    if (m->launcher_bg_dir) {
+        row_label("Vitrine de fundos", th);
+        bool vt = m->s.hide_showcase == 0;
+        if (ImGui::Checkbox("##vitrine", &vt)) m->s.hide_showcase = vt ? 0 : 1;
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Em tela larga, mostra os fundos nítidos (game-assets/launcher-bg)\n"
+                              "no espaço vazio à direita do painel inicial.");
+    }
+
     if (m->has_skip_fmv) {
         row_label("Skip FMVs", th);
         bool sk = m->s.auto_skip_fmv != 0;
@@ -3579,11 +3613,26 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
                                       ? m->host_rows_title : "Game options");
         for (int i = 0; i < m->num_host_rows; ++i) {
             ImGui::PushID(0x4057 + i);
-            row_label(m->host_row_label(i), th);
-            if (mm_button(m->host_row_value(i), ImVec2(px(150), px(30))))
-                m->host_row_step(i, +1);
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
-                m->host_row_step(i, -1);
+            const char* lbl = m->host_row_label(i);
+            row_label(lbl, th);
+            // 19/11/2026 (Samuel): a PROPORCAO só alarga a tela com Mods > Widescreen ligado.
+            // Com ele desligado, a linha diz isso e um clique liga o widescreen aqui mesmo.
+            const int ws = std::strcmp(lbl, "PROPORCAO") == 0 ? widescreen_feature_state(m) : -1;
+            if (ws == 0) {
+                if (mm_button("4:3 (desligado)", ImVec2(px(150), px(30))))
+                    widescreen_feature_enable(m);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Clique para ligar o widescreen (o mesmo que Mods > Widescreen).");
+                ImGui::PushStyleColor(ImGuiCol_Text, col(th.warn));
+                ImGui::TextWrapped("Widescreen desligado: 14:9 e 16:9 precisam dele. "
+                                   "Clique no botão acima ou ligue em Mods > Widescreen.");
+                ImGui::PopStyleColor();
+            } else {
+                if (mm_button(m->host_row_value(i), ImVec2(px(150), px(30))))
+                    m->host_row_step(i, +1);
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+                    m->host_row_step(i, -1);
+            }
             ImGui::PopID();
         }
     }
@@ -8910,6 +8959,7 @@ static void bg_scan(LauncherModel* m) {
 }
 
 static bool bg_showcase_ready(LauncherModel* m) {
+    if (m->s.hide_showcase) return false;
     bg_scan(m);
     for (int i = 0; i < g_bgs.n; ++i)
         if (g_bgs.sharp[i].id) return true;
