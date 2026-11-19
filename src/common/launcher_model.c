@@ -131,6 +131,12 @@ void launcher_model_init(LauncherModel* m,
         m->has_turbo_loads      = game->has_turbo_loads != 0;
         m->has_texture_pack     = game->has_texture_pack != 0;
         m->texture_pack_label   = game->texture_pack_label;
+        m->num_host_rows        = (game->host_row_label && game->host_row_value &&
+                                   game->host_row_step) ? game->num_host_rows : 0;
+        m->host_row_label       = game->host_row_label;
+        m->host_row_value       = game->host_row_value;
+        m->host_row_step        = game->host_row_step;
+        m->host_rows_title      = game->host_rows_title;
         m->has_fmv_pack         = game->has_fmv_pack != 0;
         m->fmv_pack_label       = game->fmv_pack_label;
         m->bookmark_labels      = game->bookmark_labels;

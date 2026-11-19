@@ -1120,6 +1120,17 @@ typedef struct RecompLauncherCGameInfo {
     int                has_video_filter;
     const char* const* video_filter_names;
     int                video_filter_count;
+
+    /* Host-owned cycle rows (Settings > Video, under a header), e.g. a
+     * game's per-layer filters or extras. The HOST owns and persists the
+     * values: the launcher only draws host_row_label(i) with a button that
+     * shows host_row_value(i) and calls host_row_step(i, +1) on click
+     * (-1 on right click). 0/NULL => no section. Appended additively. */
+    int          num_host_rows;
+    const char* (*host_row_label)(int i);
+    const char* (*host_row_value)(int i);
+    void        (*host_row_step)(int i, int delta);
+    const char*  host_rows_title;
 } RecompLauncherCGameInfo;
 
 /* recomp_launcher_run_window return codes */

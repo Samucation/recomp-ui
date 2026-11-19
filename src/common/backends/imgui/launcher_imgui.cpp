@@ -2475,6 +2475,20 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
             ImGui::TextDisabled("%s", m->texture_pack_label);
         }
     }
+    if (m->num_host_rows > 0) {
+        ImGui::Spacing();
+        ImGui::TextDisabled("%s", m->host_rows_title && m->host_rows_title[0]
+                                      ? m->host_rows_title : "Game options");
+        for (int i = 0; i < m->num_host_rows; ++i) {
+            ImGui::PushID(0x4057 + i);
+            row_label(m->host_row_label(i), th);
+            if (ImGui::Button(m->host_row_value(i), ImVec2(px(150), px(30))))
+                m->host_row_step(i, +1);
+            if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+                m->host_row_step(i, -1);
+            ImGui::PopID();
+        }
+    }
     if (m->has_fmv_pack) {
         row_label("HD movies", th);
         bool fp = m->s.fmv_pack != 0;

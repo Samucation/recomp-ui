@@ -347,6 +347,12 @@ typedef struct {
     bool     has_turbo_loads;
     bool     has_texture_pack;
     const char* texture_pack_label;
+    /* host-owned cycle rows (RecompLauncherCGameInfo.num_host_rows) */
+    int          num_host_rows;
+    const char* (*host_row_label)(int i);
+    const char* (*host_row_value)(int i);
+    void        (*host_row_step)(int i, int delta);
+    const char*  host_rows_title;
     bool     has_fmv_pack;
     const char* fmv_pack_label;
     const char* const* bookmark_labels;  // borrowed; NULL/num_bookmarks==0 => no "Start at" row
