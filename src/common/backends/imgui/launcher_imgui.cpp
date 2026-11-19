@@ -193,13 +193,15 @@ static bool mm_button(const char* label, const ImVec2& size_arg = ImVec2(0, 0)) 
     if (held) { t0.y += 1.0f; t1.y += 1.0f; }
     // contorno escuro do texto (legível sobre o brilho)
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0, 0, 0, 0.55f));
-    ImGui::RenderTextClipped(ImVec2(t0.x + st.FramePadding.x, t0.y + st.FramePadding.y + 1.0f),
-                             ImVec2(t1.x - st.FramePadding.x, t1.y - st.FramePadding.y + 1.0f),
+    ImGui::RenderTextClipped(ImVec2(t0.x + st.FramePadding.x + 1.0f, t0.y + st.FramePadding.y + 1.0f),
+                             ImVec2(t1.x - st.FramePadding.x + 1.0f, t1.y - st.FramePadding.y + 1.0f),
                              label, NULL, &ls, st.ButtonTextAlign, &bb);
     ImGui::PopStyleColor();
-    ImGui::RenderTextClipped(ImVec2(t0.x + st.FramePadding.x, t0.y + st.FramePadding.y),
-                             ImVec2(t1.x - st.FramePadding.x, t1.y - st.FramePadding.y),
-                             label, NULL, &ls, st.ButtonTextAlign, &bb);
+    // texto em "negrito": desenhado duas vezes, com 1 px de deslocamento (pedido do Samuel)
+    for (int b = 0; b < 2; ++b)
+        ImGui::RenderTextClipped(ImVec2(t0.x + st.FramePadding.x + b, t0.y + st.FramePadding.y),
+                                 ImVec2(t1.x - st.FramePadding.x + b, t1.y - st.FramePadding.y),
+                                 label, NULL, &ls, st.ButtonTextAlign, &bb);
     return pressed;
 }
 
@@ -932,7 +934,11 @@ void stepper(const char* id, int value, const char* suffix, int* out_delta) {
 // on every row — the caller passes the widest label's width (+gap) to line all
 // the controls up into a clean grid. col_w == 0 keeps the legacy flow layout
 // (control hugs the label with a fixed gap).
+// Coluna de rótulo padrão (19/11/2026): a tela de Configurações em colunas define uma largura
+// fixa enquanto desenha, para todos os botões começarem no mesmo x.
+static float s_row_col_w = 0.0f;
 void row_label(const char* text, const LauncherTheme& th, float col_w = 0.0f) {
+    if (col_w <= 0.0f) col_w = s_row_col_w;
     float x0 = ImGui::GetCursorPosX();
     ImGui::AlignTextToFramePadding();
     ImGui::TextColored(col(th.text_muted), "%s", text);
@@ -2027,9 +2033,32 @@ static bool mm_switch(const char* id, bool on, const LauncherTheme& th) {
     return clicked;
 }
 
+// Imagem do memory card de cada entrada (19/11/2026): game-assets/memcards/cartao<n>.png,
+// senão o cartão cinza padrão (assets/img/memcard.tga).
+static const LauncherTexture& memcard_art(LauncherModel* m, int slot) {
+    static LauncherTexture art[2];
+    static bool tried = false;
+    if (!tried) {
+        tried = true;
+        const char* d = m && m->launcher_bg_dir ? m->launcher_bg_dir() : nullptr;
+        if (d && d[0]) {
+            namespace fs = std::filesystem;
+            const fs::path dir = fs::u8path(d).parent_path() / "memcards";
+            for (int k = 0; k < 2; ++k) {
+                const auto p8 = (dir / (k == 0 ? "cartao1.png" : "cartao2.png")).u8string();
+                const std::string path(p8.begin(), p8.end());
+                art[k] = launcher_texture_load(path.c_str());
+            }
+        }
+    }
+    if (slot >= 0 && slot < 2 && art[slot].id) return art[slot];
+    return g_memcard;
+}
+
 // Draws the CONTENT of one small memory-card card (the caller supplies the card
 // chrome + width). Vertical stack so nothing crowds at a controller-narrow
 // width: icon + label, block count, then a Browse/New button pair.
+
 void draw_memcard_slot(LauncherModel* m, const LauncherTheme& th, int slot) {
     const SystemProfile* prof = (const SystemProfile*)m->profile;
     ImGui::PushID(slot);
@@ -2075,13 +2104,16 @@ void draw_memcard_slot(LauncherModel* m, const LauncherTheme& th, int slot) {
         img_h = px(108.0f);
     }
     float iw = img_h * (148.0f / 164.0f), ih = img_h;
-    if (g_memcard.w > 0 && g_memcard.h > 0) {
-        const float s = img_h / (float)g_memcard.h;
-        iw = g_memcard.w * s;
+    // 19/11/2026 (Samuel): cartão 1 azul (Mega Man 8) e cartão 2 vermelho (Rush), de
+    // game-assets/memcards; sem os arquivos, o cartão cinza padrão
+    const LauncherTexture& mct = memcard_art(m, slot);
+    if (mct.w > 0 && mct.h > 0) {
+        const float s = img_h / (float)mct.h;
+        iw = mct.w * s;
         // desligado: a própria imagem do cartão fica apagada (pedido do Samuel, 19/11/2026)
         const ImVec2 q0 = ImGui::GetCursorScreenPos();
         ImGui::InvisibleButton("##mcimg", ImVec2(iw, ih));
-        ImGui::GetWindowDrawList()->AddImage(tid(g_memcard), q0, ImVec2(q0.x + iw, q0.y + ih),
+        ImGui::GetWindowDrawList()->AddImage(tid(mct), q0, ImVec2(q0.x + iw, q0.y + ih),
             ImVec2(0, 0), ImVec2(1, 1), enabled ? IM_COL32_WHITE : IM_COL32(150, 150, 160, 70));
     } else {
         ImGui::Dummy(ImVec2(iw, ih));
@@ -2859,17 +2891,25 @@ static int ctrl_art_index(const LauncherModel* m, int p, int kind) {
     return CA_XSERIES;   // outro controle: a arte mais genérica
 }
 
+// Índice em g_pads do controle escolhido pelo jogador p, ou -1 (desligado / não é controle).
+static int ctrl_pad_index(const LauncherModel* m, int p);
+
 // O controle escolhido pelo jogador p está ligado agora? (teclado / nenhum: sim)
 static bool ctrl_live(const LauncherModel* m, int p) {
     if (m->s.player_src[p] != 2) return true;
+    return ctrl_pad_index(m, p) >= 0;
+}
+
+static int ctrl_pad_index(const LauncherModel* m, int p) {
+    if (m->s.player_src[p] != 2) return -1;
     const char* g = m->s.player_gamepad_guid[p];
     // o GUID salvo é o principal; o número do aparelho e o nome cobrem o caso de o GUID mudar
     // ao trocar de cabo para Bluetooth
     const char* nm = m->player_pad_name[p];
     for (int j = 0; j < g_pad_count; ++j) {
-        if (g[0] && g_pads[j].guid[0] && std::strcmp(g_pads[j].guid, g) == 0) return true;
-        if (m->player_pad_id[p] && g_pads[j].id == m->player_pad_id[p]) return true;
-        if (nm[0] && g_pads[j].name[0] && std::strcmp(g_pads[j].name, nm) == 0) return true;
+        if (g[0] && g_pads[j].guid[0] && std::strcmp(g_pads[j].guid, g) == 0) return j;
+        if (m->player_pad_id[p] && g_pads[j].id == m->player_pad_id[p]) return j;
+        if (nm[0] && g_pads[j].name[0] && std::strcmp(g_pads[j].name, nm) == 0) return j;
     }
     if (std::getenv("MM8_LAUNCHER_DEBUG")) {
         static double last = -10.0;
@@ -2882,7 +2922,54 @@ static bool ctrl_live(const LauncherModel* m, int p) {
                              (unsigned)g_pads[j].id, g_pads[j].name);
         }
     }
-    return false;
+    return -1;
+}
+
+// Bateria: ícone com 4 barrinhas + porcentagem (ou "carregando" / "com fio"), centrado em cx.
+// Devolve a altura usada (0 quando o controle não informa nada).
+static float draw_pad_battery(ImDrawList* dl, float cx, float y, const LauncherPad& pad,
+                              const LauncherTheme& th) {
+    char txt[48];
+    const int pct = pad.battery_pct;
+    if (pad.power == 4) std::snprintf(txt, sizeof(txt), "com fio");
+    else if (pad.power == 2) std::snprintf(txt, sizeof(txt), pct >= 0 ? "%d%%  carregando" : "carregando", pct);
+    else if (pad.power == 3) std::snprintf(txt, sizeof(txt), "100%%  carregado");
+    else if (pct >= 0) std::snprintf(txt, sizeof(txt), "%d%%", pct);
+    else return 0.0f;
+    const bool icon = pad.power != 4;
+    const float bw = px(30), bh = px(15), tip = px(3), gap = px(7);
+    const ImVec2 ts = ImGui::CalcTextSize(txt);
+    const float tw = (icon ? bw + tip + gap : 0.0f) + ts.x;
+    float x = cx - tw * 0.5f;
+    const float h = ts.y > bh ? ts.y : bh;
+    if (icon) {
+        const float by = y + (h - bh) * 0.5f;
+        const int level = pad.power == 3 ? 100 : pct;
+        const ImU32 c = level < 0 ? IM_COL32(170, 170, 180, 255)
+                      : level <= 20 ? IM_COL32(235, 70, 60, 255)
+                      : level <= 50 ? IM_COL32(240, 190, 50, 255) : imcol(th.good);
+        dl->AddRect(ImVec2(x, by), ImVec2(x + bw, by + bh), IM_COL32(230, 235, 245, 230), px(2.5f), 0, px(1.6f));
+        dl->AddRectFilled(ImVec2(x + bw, by + bh * 0.3f), ImVec2(x + bw + tip, by + bh * 0.7f),
+                          IM_COL32(230, 235, 245, 230), px(1.0f));
+        const int bars = level < 0 ? 0 : level >= 88 ? 4 : level >= 63 ? 3 : level >= 38 ? 2 : level >= 10 ? 1 : 0;
+        const float in = px(2.5f), sg = px(1.5f);
+        const float segw = (bw - 2 * in - 3 * sg) / 4.0f;
+        for (int k = 0; k < 4; ++k) {
+            const float sx = x + in + k * (segw + sg);
+            dl->AddRectFilled(ImVec2(sx, by + in), ImVec2(sx + segw, by + bh - in),
+                              k < bars ? c : IM_COL32(255, 255, 255, 28), px(1.0f));
+        }
+        if (pad.power == 2) {   // raio de "carregando"
+            const ImVec2 m0(x + bw * 0.55f, by + 1), m1(x + bw * 0.38f, by + bh * 0.55f),
+                         m2(x + bw * 0.62f, by + bh * 0.45f), m3(x + bw * 0.45f, by + bh - 1);
+            const ImVec2 bolt[4] = { m0, m1, m2, m3 };
+            dl->AddPolyline(bolt, 4, IM_COL32(255, 255, 255, 240), 0, px(1.8f));
+        }
+        x += bw + tip + gap;
+    }
+    dl->AddText(ImVec2(x + 1, y + (h - ts.y) * 0.5f + 1), IM_COL32(0, 0, 0, 160), txt);
+    dl->AddText(ImVec2(x, y + (h - ts.y) * 0.5f), ImGui::GetColorU32(col(th.text)), txt);
+    return h;
 }
 
 void draw_player_panel(LauncherModel* m, const LauncherTheme& th, int p, float w) {
@@ -2929,26 +3016,31 @@ void draw_player_panel(LauncherModel* m, const LauncherTheme& th, int p, float w
         // 19/11/2026 (pedido do Samuel): ao lado do controle padrão, uma setinha aponta para o
         // controle que vai ser usado de verdade (Xbox / PlayStation / teclado...), com um "check".
         const int kind = ctrl_kind(m, p);
-        ctrl_art_load(m);
         const int ai = ctrl_art_index(m, p, kind);
         const bool has_art = ai >= 0 && g_ctrl_art.color[ai].id && g_ctrl_art.color[ai].w > 0;
+        const int pj = ctrl_pad_index(m, p);
         const bool live = ctrl_live(m, p);
-        float fw = px(130), fh = px(94);
-        if (art.id && art.w > 0 && art.h > 0) {
-            const float s = (fw / art.w < fh / art.h) ? fw / (float)art.w : fh / (float)art.h;
-            fw = art.w * s; fh = art.h * s;
-        }
         const float aw = px(36);
-        const float art_ratio = has_art ? (float)g_ctrl_art.color[ai].h / (float)g_ctrl_art.color[ai].w : 0.7f;
+        // 19/11/2026 (Samuel): o controle do jogo (esquerda) e o controle em uso (direita) com a
+        // MESMA largura; os dois encolhem juntos em cartão estreito.
         float icw = has_art ? px(210) : px(88);
         bool show_pad = true;
-        if (has_art && inner < fw + aw + icw + px(8)) {
-            icw = inner - fw - aw - px(8);
-            if (icw < px(140)) {   // cartão estreito: só a arte do controle em uso
+        if (has_art && inner < 2.0f * icw + aw + px(8)) {
+            icw = (inner - aw - px(8)) * 0.5f;
+            if (icw < px(120)) {   // cartão estreito: só a arte do controle em uso
                 show_pad = false;
                 icw = inner - px(8) < px(210) ? inner - px(8) : px(210);
             }
         }
+        float fw = has_art ? icw : px(130), fh = px(94);
+        if (art.id && art.w > 0 && art.h > 0) {
+            if (has_art) fh = fw * (float)art.h / (float)art.w;
+            else {
+                const float s = (fw / art.w < fh / art.h) ? fw / (float)art.w : fh / (float)art.h;
+                fw = art.w * s; fh = art.h * s;
+            }
+        }
+        const float art_ratio = has_art ? (float)g_ctrl_art.color[ai].h / (float)g_ctrl_art.color[ai].w : 0.7f;
         const float ich = has_art ? icw * art_ratio : px(62);
         const float total = show_pad ? fw + aw + icw : icw;
         if (kind == 0 || (!has_art && inner < total + px(8))) {
@@ -3017,18 +3109,42 @@ void draw_player_panel(LauncherModel* m, const LauncherTheme& th, int p, float w
                 ImGui::SetTooltip(live ? "Em uso: %s" : "Desconectado: %s", launcher_model_player_src_label(m, p));
             ImGui::SetCursorPos(ImVec2(lx0, y + rowh));
             ImGui::Dummy(ImVec2(0, 0));
+            // bateria embaixo da arte do controle em uso (quando o aparelho informa)
+            if (live && pj >= 0) {
+                const ImVec2 bp = ImGui::GetCursorScreenPos();
+                const float bh = draw_pad_battery(dl, ic.x, bp.y + px(4), g_pads[pj], th);
+                if (bh > 0.0f) ImGui::Dummy(ImVec2(0, bh + px(6)));
+            }
             if (!live) {
-                // aviso pulsando devagar embaixo da arte
-                const float pulse = 0.80f + 0.20f * (float)std::sin(ImGui::GetTime() * 4.0);
-                const char* t1 = "CONTROLE DESCONECTADO";
-                const char* t2 = "Reconecte o controle ou escolha outro abaixo.";
-                const float w1 = ImGui::CalcTextSize(t1).x, w2 = ImGui::CalcTextSize(t2).x;
-                ImGui::SetCursorPosX(lx0 + (inner - w1) * 0.5f);
-                ImGui::TextColored(ImVec4(1.0f, 0.42f, 0.38f, pulse), "%s", t1);
-                ImGui::SetCursorPosX(lx0 + (inner > w2 ? (inner - w2) * 0.5f : 0.0f));
-                ImGui::PushStyleColor(ImGuiCol_Text, col(th.text_muted));
-                ImGui::TextWrapped("%s", t2);
-                ImGui::PopStyleColor();
+                // 19/11/2026 (Samuel): aviso mais claro, numa faixa vermelha com ícone
+                char who[96];
+                std::snprintf(who, sizeof(who), "%s", m->player_pad_name[p][0] ? m->player_pad_name[p] : "controle");
+                char body[200];
+                std::snprintf(body, sizeof(body),
+                              "Ligue o %s ou reconecte o cabo/Bluetooth: ele volta sozinho, sem "
+                              "reabrir nada. Para jogar com outro, escolha na lista abaixo.", who);
+                const float pad_in = px(10), icon_r = px(11);
+                const float bx0 = ImGui::GetCursorScreenPos().x, by0 = ImGui::GetCursorScreenPos().y + px(4);
+                const float bw = inner;
+                const float text_x = bx0 + pad_in + icon_r * 2 + px(10);
+                const float wrap = bx0 + bw - pad_in - text_x;
+                const ImVec2 t1s = ImGui::CalcTextSize("CONTROLE DESCONECTADO");
+                const ImVec2 t2s = ImGui::CalcTextSize(body, nullptr, false, wrap);
+                const float bh = pad_in * 2 + t1s.y + px(3) + t2s.y;
+                const float pulse = 0.75f + 0.25f * (float)std::sin(ImGui::GetTime() * 3.0);
+                dl->AddRectFilled(ImVec2(bx0, by0), ImVec2(bx0 + bw, by0 + bh), IM_COL32(120, 20, 24, 150), px(8));
+                dl->AddRect(ImVec2(bx0, by0), ImVec2(bx0 + bw, by0 + bh),
+                            IM_COL32(255, 90, 80, (int)(200 * pulse)), px(8), 0, px(1.5f));
+                // ícone: círculo com "!"
+                const ImVec2 icc(bx0 + pad_in + icon_r, by0 + pad_in + t1s.y * 0.5f + px(1));
+                dl->AddCircleFilled(icc, icon_r, IM_COL32(235, 70, 60, (int)(255 * pulse)));
+                dl->AddLine(ImVec2(icc.x, icc.y - icon_r * 0.5f), ImVec2(icc.x, icc.y + icon_r * 0.12f),
+                            IM_COL32_WHITE, px(2.4f));
+                dl->AddCircleFilled(ImVec2(icc.x, icc.y + icon_r * 0.48f), px(1.6f), IM_COL32_WHITE);
+                dl->AddText(ImVec2(text_x, by0 + pad_in), IM_COL32(255, 120, 110, 255), "CONTROLE DESCONECTADO");
+                dl->AddText(ImGui::GetFont(), ImGui::GetFontSize(), ImVec2(text_x, by0 + pad_in + t1s.y + px(3)),
+                            IM_COL32(235, 225, 225, 235), body, nullptr, wrap);
+                ImGui::Dummy(ImVec2(bw, bh + px(8)));
             }
         }
     }
@@ -3340,6 +3456,53 @@ static void widescreen_feature_enable(LauncherModel* m) {
     mods->feature_enable(mods->ctx, "mm8.enhancement.widescreen", "widescreen", 1);
 }
 
+// ---- Tamanho da janela com 1080p e 2K (19/11/2026, pedido do Samuel) -----------------------
+// Os tamanhos 16:9 já existiam na linha JANELA dos extras (1280X720 ... 2560X1440), escondida
+// no fim da lista. Agora a linha "Window size" percorre tudo num ciclo só:
+//   960x720 -> 1280x960 -> 1600x1200 -> 1920x1440 (4:3) -> 1920x1080 (1080p) -> 2560x1440 (2K)
+// e a linha JANELA deixa de aparecer separada no lançador (continua no ESC do jogo).
+static int host_row_find(LauncherModel* m, const char* label) {
+    for (int i = 0; i < m->num_host_rows; ++i) {
+        const char* l = m->host_row_label(i);
+        if (l && std::strcmp(l, label) == 0) return i;
+    }
+    return -1;
+}
+
+static void host_row_set_text(LauncherModel* m, int i, const char* want) {
+    for (int k = 0; k < 12; ++k) {
+        const char* v = m->host_row_value(i);
+        if (v && std::strcmp(v, want) == 0) return;
+        m->host_row_step(i, +1);
+    }
+}
+
+static const char* window_size_text(LauncherModel* m, int janela) {
+    const char* v = janela >= 0 ? m->host_row_value(janela) : nullptr;
+    if (!v || !std::strcmp(v, "AUTO")) return launcher_model_window_size_label(m);
+    if (!std::strcmp(v, "1920X1080")) return "1920 \xC3\x97 1080 (1080p)";
+    if (!std::strcmp(v, "2560X1440")) return "2560 \xC3\x97 1440 (2K)";
+    if (!std::strcmp(v, "1280X720"))  return "1280 \xC3\x97 720 (720p)";
+    if (!std::strcmp(v, "1600X900"))  return "1600 \xC3\x97 900";
+    return v;
+}
+
+static void window_size_step(LauncherModel* m, int janela) {
+    const char* v = janela >= 0 ? m->host_row_value(janela) : nullptr;
+    if (!v) { launcher_model_cycle_window_size(m); return; }
+    if (!std::strcmp(v, "AUTO")) {
+        if (m->s.window_width >= 1920) host_row_set_text(m, janela, "1920X1080");
+        else launcher_model_cycle_window_size(m);
+    } else if (!std::strcmp(v, "2560X1440")) {
+        host_row_set_text(m, janela, "AUTO");
+        launcher_model_cycle_window_size(m);          // 1920 -> volta ao menor 4:3
+    } else if (!std::strcmp(v, "1920X1080")) {
+        host_row_set_text(m, janela, "2560X1440");
+    } else {
+        host_row_set_text(m, janela, "1920X1080");
+    }
+}
+
 void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
     eyebrow("DISPLAY");
 
@@ -3429,14 +3592,37 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
     // Supersampling, Aspect ratio, Texture filtering, Antialiasing, Screen
     // model, Frame interpolation (+Presentation target), Skip FMVs, Turbo
     // loads, Fullscreen.
+    //
+    // 19/11/2026 (Samuel): em duas colunas — vídeo à esquerda, camadas/extras à direita —,
+    // com rótulos de largura fixa e botões de largura igual, para nada ficar "torto" nem
+    // descer demais. Em janela estreita volta a uma coluna só.
+    const float BW = px(200);
+    const int janela_row = m->has_window_size ? host_row_find(m, "JANELA") : -1;
+    const bool two_cols = ImGui::GetContentRegionAvail().x >= px(780) && m->num_host_rows > 0;
+    {
+        static const char* kLeftLabels[] = { "Window size", "Supersampling", "Texture filtering",
+                                             "Perspective textures", "Frame interpolation",
+                                             "Presentation target", "Vitrine de fundos", "Screen model" };
+        float lw = 0;
+        for (const char* l : kLeftLabels) { float t = ImGui::CalcTextSize(l).x; if (t > lw) lw = t; }
+        s_row_col_w = lw + px(20);
+    }
+    if (two_cols) {
+        ImGui::BeginTable("disp_cols", 2, ImGuiTableFlags_SizingStretchSame | ImGuiTableFlags_BordersInnerV);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+    }
     if (m->has_window_size) {
         row_label("Window size", th);
-        if (mm_button(launcher_model_window_size_label(m), ImVec2(px(150), px(30))))
-            launcher_model_cycle_window_size(m);
+        if (mm_button(window_size_text(m, janela_row), ImVec2(BW, px(30))))
+            window_size_step(m, janela_row);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("Clique para trocar: 4:3 (960 a 1920) e depois 16:9 em 1080p e 2K.\n"
+                              "Os tamanhos 16:9 mostram o jogo com bordas ou em widescreen.");
     } else {
         row_label("Window scale", th);
         ImGui::PushID("window_scale");
-        if (mm_button(launcher_model_scale_label(m), ImVec2(px(120), px(30))))
+        if (mm_button(launcher_model_scale_label(m), ImVec2(BW, px(30))))
             launcher_model_cycle_scale(m);
         ImGui::PopID();
     }
@@ -3452,14 +3638,14 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
 
     if (m->has_renderer) {
         row_label("Renderer", th);
-        if (mm_button(launcher_model_renderer_label(m), ImVec2(px(220), px(30))))
+        if (mm_button(launcher_model_renderer_label(m), ImVec2(BW, px(30))))
             launcher_model_toggle_renderer(m);
     }
 
     if (m->has_supersampling) {
         row_label("Supersampling", th);
         ImGui::PushID("supersampling");
-        if (mm_button(launcher_model_supersampling_label(m), ImVec2(px(120), px(30))))
+        if (mm_button(launcher_model_supersampling_label(m), ImVec2(BW, px(30))))
             launcher_model_cycle_supersampling(m);
         ImGui::PopID();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
@@ -3476,14 +3662,14 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
     // binary checkbox so Exclusive mode is reachable again.
     row_label("Fullscreen", th);
     ImGui::PushID("fullscreen");
-    if (mm_button(launcher_model_fullscreen_label(m), ImVec2(px(120), px(30))))
+    if (mm_button(launcher_model_fullscreen_label(m), ImVec2(BW, px(30))))
         launcher_model_cycle_fullscreen(m);
     ImGui::PopID();
     if (m->num_display_layouts > 0) {
         row_label("Screen layout", th);
         ImGui::PushID("screen_layout");
         if (mm_button(launcher_model_display_layout_label(m),
-                          ImVec2(px(180), px(30))))
+                          ImVec2(BW, px(30))))
             launcher_model_cycle_display_layout(m);
         ImGui::PopID();
     }
@@ -3491,11 +3677,11 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
     if (m->has_sharp_filter) {
         row_label("Scaling filter", th);
         if (mm_button(launcher_model_scaling_filter_label(m),
-                          ImVec2(px(180), px(30))))
+                          ImVec2(BW, px(30))))
             launcher_model_cycle_scaling_filter(m);
     } else if (m->has_texture_filter) {
         row_label("Texture filtering", th);
-        if (mm_button(launcher_model_texture_filter_label(m), ImVec2(px(120), px(30))))
+        if (mm_button(launcher_model_texture_filter_label(m), ImVec2(BW, px(30))))
             launcher_model_toggle_texture_filter(m);
     } else {
         row_label("Linear filtering", th);
@@ -3506,7 +3692,7 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
     if (m->has_antialiasing) {
         row_label("Antialiasing", th);
         ImGui::PushID("antialiasing");
-        if (mm_button(launcher_model_aa_label(m), ImVec2(px(90), px(30))))
+        if (mm_button(launcher_model_aa_label(m), ImVec2(BW, px(30))))
             launcher_model_cycle_aa(m);
         ImGui::PopID();
     }
@@ -3547,7 +3733,7 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
         row_label("Screen model", th);
         // Wide enough for the longest label ("Super Game Boy (No Border)");
         // shorter models (e.g. "DMG") center within the same fixed box.
-        if (mm_button(launcher_model_screen_kind_label(m), ImVec2(px(220), px(30))))
+        if (mm_button(launcher_model_screen_kind_label(m), ImVec2(BW, px(30))))
             launcher_model_cycle_screen_kind(m);
     }
 
@@ -3557,7 +3743,7 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
         // CRT). Presentation only — never changes what the game renders.
         row_label("Video filter", th);
         ImGui::PushID("video_filter");
-        if (mm_button(launcher_model_video_filter_label(m), ImVec2(px(220), px(30))))
+        if (mm_button(launcher_model_video_filter_label(m), ImVec2(BW, px(30))))
             launcher_model_cycle_video_filter(m);
         ImGui::PopID();
         if (ImGui::IsItemHovered())
@@ -3577,7 +3763,7 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
         if (ImGui::Checkbox("##fi", &fi)) launcher_model_toggle_frame_interp(m);
         if (m->s.frame_interp) {
             row_label("Presentation target", th);
-            if (mm_button(launcher_model_interp_fps_label(m), ImVec2(px(150), px(30))))
+            if (mm_button(launcher_model_interp_fps_label(m), ImVec2(BW, px(30))))
                 launcher_model_cycle_interp_fps(m);
         }
     }
@@ -3607,35 +3793,6 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
             ImGui::TextDisabled("%s", m->texture_pack_label);
         }
     }
-    if (m->num_host_rows > 0) {
-        ImGui::Spacing();
-        ImGui::TextDisabled("%s", m->host_rows_title && m->host_rows_title[0]
-                                      ? m->host_rows_title : "Game options");
-        for (int i = 0; i < m->num_host_rows; ++i) {
-            ImGui::PushID(0x4057 + i);
-            const char* lbl = m->host_row_label(i);
-            row_label(lbl, th);
-            // 19/11/2026 (Samuel): a PROPORCAO só alarga a tela com Mods > Widescreen ligado.
-            // Com ele desligado, a linha diz isso e um clique liga o widescreen aqui mesmo.
-            const int ws = std::strcmp(lbl, "PROPORCAO") == 0 ? widescreen_feature_state(m) : -1;
-            if (ws == 0) {
-                if (mm_button("4:3 (desligado)", ImVec2(px(150), px(30))))
-                    widescreen_feature_enable(m);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Clique para ligar o widescreen (o mesmo que Mods > Widescreen).");
-                ImGui::PushStyleColor(ImGuiCol_Text, col(th.warn));
-                ImGui::TextWrapped("Widescreen desligado: 14:9 e 16:9 precisam dele. "
-                                   "Clique no botão acima ou ligue em Mods > Widescreen.");
-                ImGui::PopStyleColor();
-            } else {
-                if (mm_button(m->host_row_value(i), ImVec2(px(150), px(30))))
-                    m->host_row_step(i, +1);
-                if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
-                    m->host_row_step(i, -1);
-            }
-            ImGui::PopID();
-        }
-    }
     if (m->has_fmv_pack) {
         row_label("HD movies", th);
         bool fp = m->s.fmv_pack != 0;
@@ -3648,7 +3805,7 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
 
     if (m->has_rewind_depth) {
         row_label("Rewind buffer", th);
-        if (mm_button(launcher_model_rewind_depth_label(m), ImVec2(px(100), px(30))))
+        if (mm_button(launcher_model_rewind_depth_label(m), ImVec2(BW, px(30))))
             launcher_model_cycle_rewind_depth(m);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
@@ -3656,13 +3813,56 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
                 "Takes effect on the next launch.");
         }
         row_label("Rewind interval", th);
-        if (mm_button(launcher_model_rewind_interval_label(m), ImVec2(px(100), px(30))))
+        if (mm_button(launcher_model_rewind_interval_label(m), ImVec2(BW, px(30))))
             launcher_model_cycle_rewind_interval(m);
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
             ImGui::SetTooltip(
                 "Frames between rewind snapshots (1 / 4 / 8 / 12 / 15).\n"
                 "FMV still densifies toward 4 when this is sparser.\n"
                 "Takes effect on the next launch.");
+        }
+    }
+
+    if (m->num_host_rows > 0) {
+        if (two_cols) {
+            ImGui::TableNextColumn();
+            float lw = 0;
+            for (int i = 0; i < m->num_host_rows; ++i) {
+                float t = ImGui::CalcTextSize(m->host_row_label(i)).x;
+                if (t > lw) lw = t;
+            }
+            s_row_col_w = lw + px(20);
+            eyebrow("CAMADAS E EXTRAS");
+            ImGui::TextDisabled("Tamb\xC3\xA9m no menu ESC durante o jogo");
+        } else {
+            ImGui::Spacing();
+            ImGui::TextDisabled("%s", m->host_rows_title && m->host_rows_title[0]
+                                          ? m->host_rows_title : "Game options");
+        }
+        for (int i = 0; i < m->num_host_rows; ++i) {
+            if (i == janela_row) continue;   // juntou-se ao "Window size"
+            ImGui::PushID(0x4057 + i);
+            const char* lbl = m->host_row_label(i);
+            row_label(lbl, th);
+            // 19/11/2026 (Samuel): a PROPORCAO só alarga a tela com Mods > Widescreen ligado.
+            // Com ele desligado, a linha diz isso e um clique liga o widescreen aqui mesmo.
+            const int ws = std::strcmp(lbl, "PROPORCAO") == 0 ? widescreen_feature_state(m) : -1;
+            if (ws == 0) {
+                if (mm_button("4:3 (desligado)", ImVec2(BW, px(30))))
+                    widescreen_feature_enable(m);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Clique para ligar o widescreen (o mesmo que Mods > Widescreen).");
+                ImGui::PushStyleColor(ImGuiCol_Text, col(th.warn));
+                ImGui::TextWrapped("Widescreen desligado: 14:9 e 16:9 precisam dele. "
+                                   "Clique no botão acima ou ligue em Mods > Widescreen.");
+                ImGui::PopStyleColor();
+            } else {
+                if (mm_button(m->host_row_value(i), ImVec2(BW, px(30))))
+                    m->host_row_step(i, +1);
+                if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
+                    m->host_row_step(i, -1);
+            }
+            ImGui::PopID();
         }
     }
 
@@ -3696,6 +3896,8 @@ void draw_display_controls(LauncherModel* m, const LauncherTheme& th) {
                 launcher_model_set_hdpack_dir(m, buf);
         }
     }
+    if (two_cols) ImGui::EndTable();
+    s_row_col_w = 0.0f;
 }
 
 // Video/Display module (docs/ARCHITECTURE.md): base window-scale/fullscreen
@@ -9094,6 +9296,82 @@ static void draw_footer_tip(float x0, float x1, float cy) {
     dl->AddText(f, fs, ImVec2(tx, ty), ImGui::GetColorU32(ImVec4(tc.x, tc.y, tc.z, a)), tip, nullptr, maxw, &clip);
 }
 
+// ---- Aviso de controle detectado (19/11/2026, pedido do Samuel) ----------------------------
+// Quando um controle aparece (ligado, cabo ou Bluetooth), um aviso desce no alto da janela,
+// fica uns segundos e some com fade. Os controles que já estavam ligados ao abrir não avisam.
+static void draw_pad_toasts(const LauncherTheme& th) {
+    struct Toast { char text[128]; double t0; int pct; int power; };
+    static Toast toasts[4];
+    static int nt = 0;
+    static uint32_t known[LNG_MAX_PADS];
+    static int nk = -1;   // -1: ainda não viu a primeira lista
+    const double now = ImGui::GetTime();
+    // novos controles
+    if (nk < 0) {
+        nk = 0;
+        for (int j = 0; j < g_pad_count && nk < LNG_MAX_PADS; ++j) known[nk++] = g_pads[j].id;
+        if (now < 1.5) { /* abrindo: só registra */ }
+    } else {
+        uint32_t cur[LNG_MAX_PADS]; int nc = 0;
+        for (int j = 0; j < g_pad_count && nc < LNG_MAX_PADS; ++j) {
+            cur[nc++] = g_pads[j].id;
+            bool seen = false;
+            for (int k = 0; k < nk; ++k) if (known[k] == g_pads[j].id) { seen = true; break; }
+            if (!seen) {
+                if (nt == 4) { for (int k = 1; k < 4; ++k) toasts[k - 1] = toasts[k]; nt = 3; }
+                Toast& t = toasts[nt++];
+                std::snprintf(t.text, sizeof(t.text), "%s detectado",
+                              g_pads[j].name[0] ? g_pads[j].name : "Controle");
+                t.t0 = now; t.pct = g_pads[j].battery_pct; t.power = g_pads[j].power;
+            }
+        }
+        std::memcpy(known, cur, sizeof(uint32_t) * (size_t)nc);
+        nk = nc;
+    }
+    // desenho: de cima para baixo, no centro do alto da janela
+    const double fade_in = 0.35, hold = 3.2, fade_out = 0.9, life = fade_in + hold + fade_out;
+    int w = 0;
+    for (int k = 0; k < nt; ++k) if (now - toasts[k].t0 < life) toasts[w++] = toasts[k];
+    nt = w;
+    if (nt == 0) return;
+    ImDrawList* dl = ImGui::GetForegroundDrawList();
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    float y = vp->Pos.y + px(70);
+    for (int k = 0; k < nt; ++k) {
+        const Toast& t = toasts[k];
+        const double age = now - t.t0;
+        float a = 1.0f;
+        if (age < fade_in) a = (float)(age / fade_in);
+        else if (age > fade_in + hold) a = 1.0f - (float)((age - fade_in - hold) / fade_out);
+        if (a < 0) a = 0;
+        const float slide = (1.0f - (age < fade_in ? a : 1.0f)) * px(-14);
+        char sub[48] = "";
+        if (t.power == 4) std::snprintf(sub, sizeof(sub), "com fio");
+        else if (t.pct >= 0) std::snprintf(sub, sizeof(sub), "bateria %d%%%s", t.pct, t.power == 2 ? " (carregando)" : "");
+        const ImVec2 ts = ImGui::CalcTextSize(t.text);
+        const ImVec2 ss = sub[0] ? ImGui::CalcTextSize(sub) : ImVec2(0, 0);
+        const float ir = px(13), padx = px(16), pady = px(10);
+        const float bw = padx * 2 + ir * 2 + px(12) + (ts.x > ss.x ? ts.x : ss.x);
+        const float bh = pady * 2 + ts.y + (sub[0] ? ss.y + px(2) : 0.0f);
+        const float x0 = vp->Pos.x + (vp->Size.x - bw) * 0.5f, y0 = y + slide;
+        const int A = (int)(255 * a);
+        dl->AddRectFilled(ImVec2(x0 + px(2), y0 + px(4)), ImVec2(x0 + bw + px(2), y0 + bh + px(4)),
+                          IM_COL32(0, 0, 0, (int)(110 * a)), bh * 0.5f);
+        dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + bw, y0 + bh), IM_COL32(14, 30, 62, (int)(235 * a)), bh * 0.5f);
+        dl->AddRect(ImVec2(x0, y0), ImVec2(x0 + bw, y0 + bh), imcol(th.good, 0.9f * a), bh * 0.5f, 0, px(1.8f));
+        // ícone: círculo verde com check
+        const ImVec2 c(x0 + padx + ir, y0 + bh * 0.5f);
+        dl->AddCircleFilled(c, ir, imcol(th.good, a));
+        const ImVec2 ck[3] = { ImVec2(c.x - ir * 0.45f, c.y + ir * 0.02f), ImVec2(c.x - ir * 0.10f, c.y + ir * 0.38f),
+                               ImVec2(c.x + ir * 0.50f, c.y - ir * 0.36f) };
+        dl->AddPolyline(ck, 3, IM_COL32(255, 255, 255, A), 0, px(2.4f));
+        const float tx = c.x + ir + px(12);
+        dl->AddText(ImVec2(tx, y0 + pady), IM_COL32(255, 255, 255, A), t.text);
+        if (sub[0]) dl->AddText(ImVec2(tx, y0 + pady + ts.y + px(2)), IM_COL32(190, 205, 230, A), sub);
+        y += bh + px(10);
+    }
+}
+
 void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logical_h) {
     ImGuiViewport* vp = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(vp->Pos);
@@ -9272,6 +9550,7 @@ void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logic
     // Transfer Pak config modal (N64): opened by any tile, dashboard or
     // Controller page. Drawn at root so it isn't clipped by a card child.
     if (m->tpak_slots > 0) draw_tpak_modal(m, th);
+    draw_pad_toasts(th);
     ImGui::End();
     (void)logical_h;
 }

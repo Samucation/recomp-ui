@@ -160,6 +160,18 @@ int launcher_input_poll(LauncherPad* out, int max, int enable_gyro) {
                     out[n].gyro_z = rate[2];
                 }
             }
+            out[n].battery_pct = -1;
+            if (opened && opened->handle) {
+                int pct = -1;
+                switch (SDL_GetGamepadPowerInfo(opened->handle, &pct)) {
+                    case SDL_POWERSTATE_ON_BATTERY: out[n].power = 1; break;
+                    case SDL_POWERSTATE_CHARGING:   out[n].power = 2; break;
+                    case SDL_POWERSTATE_CHARGED:    out[n].power = 3; break;
+                    case SDL_POWERSTATE_NO_BATTERY: out[n].power = 4; break;
+                    default:                        out[n].power = 0; break;
+                }
+                out[n].battery_pct = pct >= 0 && pct <= 100 ? pct : -1;
+            }
             ++n;
         }
         SDL_free(ids);
@@ -223,6 +235,18 @@ int launcher_input_poll(LauncherPad* out, int max, int enable_gyro) {
             }
         }
 #endif
+        out[n].battery_pct = -1;
+        if (opened && opened->handle) {
+            /* SDL2 só dá o nível em faixas: vira uma porcentagem aproximada */
+            switch (SDL_JoystickCurrentPowerLevel(SDL_GameControllerGetJoystick(opened->handle))) {
+                case SDL_JOYSTICK_POWER_EMPTY:  out[n].power = 1; out[n].battery_pct = 5;   break;
+                case SDL_JOYSTICK_POWER_LOW:    out[n].power = 1; out[n].battery_pct = 20;  break;
+                case SDL_JOYSTICK_POWER_MEDIUM: out[n].power = 1; out[n].battery_pct = 55;  break;
+                case SDL_JOYSTICK_POWER_FULL:   out[n].power = 1; out[n].battery_pct = 100; break;
+                case SDL_JOYSTICK_POWER_WIRED:  out[n].power = 4; break;
+                default:                        out[n].power = 0; break;
+            }
+        }
         ++n;
     }
 #endif

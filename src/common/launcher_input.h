@@ -22,6 +22,11 @@ typedef struct {
     char     guid[40];  // SDL_JoystickGetGUIDString (persists across reconnects)
     int      has_gyro;  // bool: angular-rate sensor opened and enabled
     float    gyro_z;    // radians/second around the controller face normal
+    // Bateria (19/11/2026, pedido do Samuel; lançador mostra barras e %):
+    // power: 0 desconhecido, 1 na bateria, 2 carregando, 3 carregado, 4 com fio/sem bateria.
+    // battery_pct: 0..100, ou -1 quando o aparelho não informa.
+    int      power;
+    int      battery_pct;
 } LauncherPad;
 
 // Fill `out` (capacity `max`) with the gamepads SDL currently sees. Returns the
