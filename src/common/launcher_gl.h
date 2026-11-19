@@ -34,6 +34,10 @@ LauncherTexture launcher_texture_load_colorkey(const char* path, int tolerance);
 // (`dim` 0..1 multiplies the luma): "disc not present" cover art.
 LauncherTexture launcher_texture_load_gray(const char* path, float dim);
 
+// Background art: shrunk to ~`max_w` px wide, box-blurred (`radius` px at that size, 3
+// passes ~ gaussian) and darkened by `dim` (0..1). Used behind the launcher UI.
+LauncherTexture launcher_texture_load_blurred(const char* path, int max_w, int radius, float dim);
+
 // Upload raw RGBA8 pixels (w*h*4 bytes). `nearest` != 0 keeps pixel art crisp.
 LauncherTexture launcher_texture_from_rgba(const unsigned char* rgba, int w, int h, int nearest);
 

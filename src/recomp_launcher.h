@@ -1153,6 +1153,8 @@ typedef struct RecompLauncherCGameInfo {
     const char* (*game_discs_notice)(void);
     /* Optional: image file (png/jpg/tga) with the cover of disc i, or NULL/"" (cover carousel). */
     const char* (*game_disc_cover)(int i);
+    /* Optional: folder with launcher background images (blurred behind the UI), or NULL/"". */
+    const char* (*launcher_bg_dir)(void);
 } RecompLauncherCGameInfo;
 
 /* recomp_launcher_run_window return codes */

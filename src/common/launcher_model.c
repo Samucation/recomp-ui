@@ -148,6 +148,7 @@ void launcher_model_init(LauncherModel* m,
         m->game_disc_import     = game->game_disc_import;
         m->game_discs_notice    = game->game_discs_notice;
         m->game_disc_cover      = game->game_disc_cover;
+        m->launcher_bg_dir      = game->launcher_bg_dir;
         m->has_fmv_pack         = game->has_fmv_pack != 0;
         m->fmv_pack_label       = game->fmv_pack_label;
         m->bookmark_labels      = game->bookmark_labels;

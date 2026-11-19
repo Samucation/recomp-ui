@@ -364,6 +364,8 @@ typedef struct {
     const char* (*game_discs_notice)(void);
     /* Optional: image file (png/jpg/tga) with the cover of disc i, or NULL/"" (cover carousel). */
     const char* (*game_disc_cover)(int i);
+    /* Optional: folder with launcher background images (blurred behind the UI), or NULL/"". */
+    const char* (*launcher_bg_dir)(void);
     bool     has_fmv_pack;
     const char* fmv_pack_label;
     const char* const* bookmark_labels;  // borrowed; NULL/num_bookmarks==0 => no "Start at" row

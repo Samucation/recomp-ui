@@ -60,6 +60,80 @@ LauncherTexture launcher_texture_load_gray(const char* path, float dim) {
     return t;
 }
 
+// Fundo do launcher (19/11/2026): reduz, borra (3 passadas de caixa ~ gaussiana) e escurece.
+static void box_blur_rgb(float* img, float* tmp, int w, int h, int r) {
+    const float inv = 1.0f / (float)(2 * r + 1);
+    for (int y = 0; y < h; ++y) {               // horizontal
+        float* row = img + (size_t)y * w * 3;
+        for (int c = 0; c < 3; ++c) {
+            float acc = 0.0f;
+            for (int k = -r; k <= r; ++k) { int x = k < 0 ? 0 : (k >= w ? w - 1 : k); acc += row[x * 3 + c]; }
+            for (int x = 0; x < w; ++x) {
+                tmp[((size_t)y * w + x) * 3 + c] = acc * inv;
+                int xo = x - r, xi = x + r + 1;
+                if (xo < 0) xo = 0;
+                if (xi >= w) xi = w - 1;
+                acc += row[xi * 3 + c] - row[xo * 3 + c];
+            }
+        }
+    }
+    for (int x = 0; x < w; ++x) {               // vertical
+        for (int c = 0; c < 3; ++c) {
+            float acc = 0.0f;
+            for (int k = -r; k <= r; ++k) { int y = k < 0 ? 0 : (k >= h ? h - 1 : k); acc += tmp[((size_t)y * w + x) * 3 + c]; }
+            for (int y = 0; y < h; ++y) {
+                img[((size_t)y * w + x) * 3 + c] = acc * inv;
+                int yo = y - r, yi = y + r + 1;
+                if (yo < 0) yo = 0;
+                if (yi >= h) yi = h - 1;
+                acc += tmp[((size_t)yi * w + x) * 3 + c] - tmp[((size_t)yo * w + x) * 3 + c];
+            }
+        }
+    }
+}
+
+LauncherTexture launcher_texture_load_blurred(const char* path, int max_w, int radius, float dim) {
+    LauncherTexture t = { 0, 0, 0 };
+    int w = 0, h = 0, comp = 0;
+    unsigned char* src = stbi_load(path, &w, &h, &comp, 4);
+    if (!src) return t;
+    int f = 1;                                   // fator de redução inteiro (média por bloco)
+    while (max_w > 0 && w / (f + 1) >= max_w) ++f;
+    const int ow = w / f, oh = h / f;
+    float* img = (float*)malloc((size_t)ow * oh * 3 * sizeof(float));
+    float* tmp = (float*)malloc((size_t)ow * oh * 3 * sizeof(float));
+    unsigned char* out = (unsigned char*)malloc((size_t)ow * oh * 4);
+    if (ow > 0 && oh > 0 && img && tmp && out) {
+        const float n = (float)(f * f);
+        for (int y = 0; y < oh; ++y)
+            for (int x = 0; x < ow; ++x) {
+                float s[3] = { 0, 0, 0 };
+                for (int yy = 0; yy < f; ++yy)
+                    for (int xx = 0; xx < f; ++xx) {
+                        const unsigned char* p = src + ((size_t)(y * f + yy) * w + (x * f + xx)) * 4;
+                        s[0] += p[0]; s[1] += p[1]; s[2] += p[2];
+                    }
+                float* d = img + ((size_t)y * ow + x) * 3;
+                d[0] = s[0] / n; d[1] = s[1] / n; d[2] = s[2] / n;
+            }
+        if (radius > 0)
+            for (int pass = 0; pass < 3; ++pass) box_blur_rgb(img, tmp, ow, oh, radius);
+        if (dim < 0.0f) dim = 0.0f;
+        if (dim > 1.0f) dim = 1.0f;
+        for (int i = 0; i < ow * oh; ++i) {
+            for (int c = 0; c < 3; ++c) {
+                float v = img[i * 3 + c] * dim;
+                out[i * 4 + c] = (unsigned char)(v > 255.0f ? 255.0f : (v < 0.0f ? 0.0f : v));
+            }
+            out[i * 4 + 3] = 255;
+        }
+        t = upload_rgba(out, ow, oh, 0);
+    }
+    free(img); free(tmp); free(out);
+    stbi_image_free(src);
+    return t;
+}
+
 // Shared upload path. `colorkey_tol` < 0 disables color-keying.
 static LauncherTexture load_impl(const char* path, int colorkey_tol) {
     LauncherTexture t = { 0, 0, 0 };
