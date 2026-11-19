@@ -9263,7 +9263,7 @@ static void draw_bg_showcase(ImVec2 p0, ImVec2 size) {
 // ---- Dicas no rodapé (19/11/2026, pedido do Samuel) -----------------------------------------
 // Uma frase por vez entre "Pular esta tela" e os botões, aparecendo e sumindo devagar.
 static const char* const kLauncherTips[] = {
-    "Dica: durante o jogo, ESC abre o menu; em EXTRAS ficam a tradução, as bordas e outros ajustes.",
+    "Dica: durante o jogo, ESC (ou R3 no controle) abre o menu; em EXTRAS ficam a tradução, as bordas e outros ajustes.",
     "Dica: em EXTRAS > BORDAS, as faixas dos lados da tela larga podem mostrar reflexo, luz ou uma imagem.",
     "Dica: escolha o controle de cada jogador no cartão dele; o desenho mostra qual está em uso.",
     "Dica: se o controle se desconectar, o desenho dele fica cinza aqui. É só ligá-lo de novo.",

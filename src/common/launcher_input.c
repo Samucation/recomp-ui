@@ -5,6 +5,38 @@
 
 #include <stdio.h>
 #include <string.h>
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
+/* Bateria do Xbox pelo XInput do Windows (19/11/2026). No adaptador sem fio e no Bluetooth o
+ * driver HIDAPI do SDL não informa a carga ("SEM LEITURA" no jogo do Samuel); o XInput informa.
+ * Usado só para controles Xbox e só quando o SDL não sabe. Sem DLL ou sem controle XInput: 0. */
+#if defined(_WIN32)
+typedef struct { unsigned char type, level; } XBatInfo;
+typedef unsigned long (__stdcall *XBatFn)(unsigned long, unsigned char, XBatInfo*);
+static int xinput_battery(int* pct, int* power) {
+    static XBatFn fn = NULL;
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        HMODULE h = LoadLibraryA("xinput1_4.dll");
+        if (!h) h = LoadLibraryA("xinput1_3.dll");
+        if (h) fn = (XBatFn)(void*)GetProcAddress(h, "XInputGetBatteryInformation");
+    }
+    if (!fn) return 0;
+    for (unsigned long i = 0; i < 4; ++i) {
+        XBatInfo b = {0, 0};
+        if (fn(i, 0 /* BATTERY_DEVTYPE_GAMEPAD */, &b) != 0) continue;
+        if (b.type == 0 /* DISCONNECTED */ || b.type == 0xFF /* UNKNOWN */) continue;
+        if (b.type == 1 /* WIRED */) { *power = 4; *pct = -1; return 1; }
+        static const int lv[4] = { 5, 25, 60, 100 };
+        *power = 1; *pct = lv[b.level & 3];
+        return 1;
+    }
+    return 0;
+}
+#endif
 
 typedef struct {
     uint32_t id;
@@ -171,6 +203,11 @@ int launcher_input_poll(LauncherPad* out, int max, int enable_gyro) {
                     default:                        out[n].power = 0; break;
                 }
                 out[n].battery_pct = pct >= 0 && pct <= 100 ? pct : -1;
+#if defined(_WIN32)
+                if (out[n].power == 0 && out[n].battery_pct < 0 &&
+                    (SDL_strcasestr(out[n].name, "xbox") || SDL_strcasestr(out[n].name, "xinput")))
+                    (void)xinput_battery(&out[n].battery_pct, &out[n].power);
+#endif
             }
             ++n;
         }
