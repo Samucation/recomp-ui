@@ -51,6 +51,9 @@ extern "C" {
 #define RECOMP_LAUNCHER_HAS_TEXTURE_PACK 1
 /* Same for GameInfo.has_fmv_pack / Settings.fmv_pack (HD movie-pack toggle). */
 #define RECOMP_LAUNCHER_HAS_FMV_PACK 1
+/* GameInfo.num_game_discs / game_disc_* (the collection's discs: presence,
+ * import of a player's BIN/CUE, first-run notice). */
+#define RECOMP_LAUNCHER_HAS_GAME_DISCS 1
 /* Same for GameInfo.bookmark_labels / num_bookmarks / Settings.bookmark_index
  * ("Start at" row: boot normally or resume a host-provided savestate). */
 #define RECOMP_LAUNCHER_HAS_BOOKMARKS 1
@@ -1131,6 +1134,23 @@ typedef struct RecompLauncherCGameInfo {
     const char* (*host_row_value)(int i);
     void        (*host_row_step)(int i, int delta);
     const char*  host_rows_title;
+
+    /* The collection's discs (e.g. US / Japanese PlayStation, Sega Saturn).
+     * The launcher lists them with their state and a "Localizar..." button
+     * (native file picker, *.cue / *.bin) that hands the chosen path to
+     * game_disc_import (the host validates and copies it into the project);
+     * game_disc_state: 0 missing, 1 present, 2 copying, 3 error. While a
+     * REQUIRED disc is missing the launcher opens a first-run notice with
+     * game_discs_notice (what discs, how many files, which format).
+     * 0/NULL => no section. Appended additively. */
+    int          num_game_discs;
+    const char* (*game_disc_name)(int i);
+    const char* (*game_disc_detail)(int i);
+    const char* (*game_disc_status)(int i);
+    int         (*game_disc_state)(int i);
+    int         (*game_disc_required)(int i);
+    int         (*game_disc_import)(int i, const char* path);
+    const char* (*game_discs_notice)(void);
 } RecompLauncherCGameInfo;
 
 /* recomp_launcher_run_window return codes */

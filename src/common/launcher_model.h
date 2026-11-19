@@ -353,6 +353,15 @@ typedef struct {
     const char* (*host_row_value)(int i);
     void        (*host_row_step)(int i, int delta);
     const char*  host_rows_title;
+    /* the collection's discs (RecompLauncherCGameInfo.num_game_discs) */
+    int          num_game_discs;
+    const char* (*game_disc_name)(int i);
+    const char* (*game_disc_detail)(int i);
+    const char* (*game_disc_status)(int i);
+    int         (*game_disc_state)(int i);
+    int         (*game_disc_required)(int i);
+    int         (*game_disc_import)(int i, const char* path);
+    const char* (*game_discs_notice)(void);
     bool     has_fmv_pack;
     const char* fmv_pack_label;
     const char* const* bookmark_labels;  // borrowed; NULL/num_bookmarks==0 => no "Start at" row

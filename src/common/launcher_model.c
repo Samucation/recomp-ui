@@ -137,6 +137,16 @@ void launcher_model_init(LauncherModel* m,
         m->host_row_value       = game->host_row_value;
         m->host_row_step        = game->host_row_step;
         m->host_rows_title      = game->host_rows_title;
+        m->num_game_discs       = (game->game_disc_name && game->game_disc_status &&
+                                   game->game_disc_state && game->game_disc_import)
+                                  ? game->num_game_discs : 0;
+        m->game_disc_name       = game->game_disc_name;
+        m->game_disc_detail     = game->game_disc_detail;
+        m->game_disc_status     = game->game_disc_status;
+        m->game_disc_state      = game->game_disc_state;
+        m->game_disc_required   = game->game_disc_required;
+        m->game_disc_import     = game->game_disc_import;
+        m->game_discs_notice    = game->game_discs_notice;
         m->has_fmv_pack         = game->has_fmv_pack != 0;
         m->fmv_pack_label       = game->fmv_pack_label;
         m->bookmark_labels      = game->bookmark_labels;

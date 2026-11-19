@@ -1021,6 +1021,100 @@ void draw_verdict_block(const LauncherModel* m, const LauncherTheme& th, float a
     }
 }
 
+// ---- The collection's discs (RecompLauncherCGameInfo.num_game_discs) -------
+// Each disc: state dot + name + status, a "Localizar..." button (native file
+// picker for the .cue) that hands the path to the host, which validates it and
+// copies the BIN/CUE into the project. Used in the GAME card and in the
+// first-run notice below.
+static void pick_game_disc(LauncherModel* m, int i) {
+    static const char* kPats[] = {"*.cue", "*.bin", "*.iso"};
+    char title[160];
+    snprintf(title, sizeof(title), "Escolha o arquivo .cue: %s", m->game_disc_name(i));
+    char path[1024] = {0};
+    const int r = launcher_try_pick_file(title, kPats, 3, "Disco BIN/CUE (.cue)", path, sizeof(path));
+    if (r == 1 && path[0]) m->game_disc_import(i, path);
+}
+
+static void draw_game_disc_rows(LauncherModel* m, const LauncherTheme& th, float availw, bool detailed) {
+    for (int i = 0; i < m->num_game_discs; ++i) {
+        ImGui::PushID(0x51C0 + i);
+        const int st = m->game_disc_state(i);
+        const ImVec4 c = st == 1 ? col(th.good) : (st == 2 ? col(th.text_muted) : col(th.warn));
+        {   // state dot (filled = present, ring = missing)
+            const float r = ImGui::GetTextLineHeight() * 0.32f;
+            const ImVec2 p0 = ImGui::GetCursorScreenPos();
+            const ImVec2 cc(p0.x + r + 1, p0.y + ImGui::GetTextLineHeight() * 0.5f);
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            if (st == 1) dl->AddCircleFilled(cc, r, ImGui::GetColorU32(c));
+            else dl->AddCircle(cc, r, ImGui::GetColorU32(c), 0, 2.0f);
+            ImGui::Dummy(ImVec2(2 * r + 4, ImGui::GetTextLineHeight()));
+        }
+        ImGui::SameLine();
+        ImGui::TextUnformatted(m->game_disc_name(i));
+        const bool req = m->game_disc_required && m->game_disc_required(i);
+        if (req) { ImGui::SameLine(); ImGui::TextDisabled("(obrigatório)"); }
+        const float bw = px(110);
+        ImGui::SameLine(availw - bw > px(10) ? availw - bw : 0);
+        ImGui::BeginDisabled(st == 2);
+        if (ImGui::Button(st == 1 ? "Trocar..." : "Localizar...", ImVec2(bw, 0))) pick_game_disc(m, i);
+        ImGui::EndDisabled();
+        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + availw);
+        ImGui::Indent(px(18));
+        ImGui::TextColored(c, "%s", m->game_disc_status(i));
+        if (detailed && m->game_disc_detail)
+            ImGui::TextColored(col(th.text_muted), "%s", m->game_disc_detail(i));
+        ImGui::Unindent(px(18));
+        ImGui::PopTextWrapPos();
+        ImGui::PopID();
+    }
+}
+
+static void draw_game_discs_block(LauncherModel* m, const LauncherTheme& th, float availw) {
+    if (m->num_game_discs <= 0) return;
+    ImGui::Dummy(ImVec2(0, px(8)));
+    ImGui::PushStyleColor(ImGuiCol_Separator, col(th.border));
+    ImGui::Separator();
+    ImGui::PopStyleColor();
+    ImGui::TextDisabled("DISCOS DA COLETÂNEA");
+    draw_game_disc_rows(m, th, availw, false);
+}
+
+// First-run notice: opens once per launcher run while a REQUIRED disc is
+// missing (and again from nowhere else), explaining which discs, how many
+// files and which format, with the same Localizar buttons.
+static void draw_game_discs_modal(LauncherModel* m, const LauncherTheme& th) {
+    static bool s_asked = false;
+    if (m->num_game_discs <= 0) return;
+    bool missing = false;
+    for (int i = 0; i < m->num_game_discs; ++i)
+        if (m->game_disc_required && m->game_disc_required(i) && m->game_disc_state(i) != 1)
+            missing = true;
+    if (missing && !s_asked) {
+        s_asked = true;
+        ImGui::OpenPopup("Discos necessários");
+    }
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(vp->Size.x * 0.8f, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Discos necessários", nullptr, ImGuiWindowFlags_NoSavedSettings))
+        return;
+    const float w = ImGui::GetContentRegionAvail().x;
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + w);
+    ImGui::TextColored(col(th.warn), "Sem as cópias dos discos (ROMs) o projeto não roda.");
+    ImGui::TextUnformatted(
+        "O projeto não traz o jogo. Use cópias dos SEUS discos, no formato BIN/CUE "
+        "(padrão Redump: o arquivo .cue e todos os .bin da mesma pasta). Imagens .iso, "
+        ".chd ou compactadas (.zip/.7z) não servem. Clique em Localizar e escolha o "
+        "arquivo .cue: o jogo confere o disco e copia tudo para dentro do projeto.");
+    ImGui::Dummy(ImVec2(0, px(6)));
+    if (m->game_discs_notice) ImGui::TextColored(col(th.text_muted), "%s", m->game_discs_notice());
+    ImGui::PopTextWrapPos();
+    draw_game_disc_rows(m, th, w, false);
+    ImGui::Dummy(ImVec2(0, px(8)));
+    if (ImGui::Button("Fechar", ImVec2(px(140), px(32)))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 void draw_game_panel(LauncherModel* m, const LauncherTheme& th, bool fill_h = false) {
     if (!begin_panel("game", 0, fill_h)) { end_panel(); return; }
     // No "GAME" eyebrow: the box art itself tells the user this is the game.
@@ -1041,6 +1135,7 @@ void draw_game_panel(LauncherModel* m, const LauncherTheme& th, bool fill_h = fa
         if (disc_verdict) reserve += px(120.0f);          // taller: icon+headline + tracks row
         if (m->saves_supported) reserve += px(96.0f);    // compact SAVES row below Change ROM
         if (m->password_save_path) reserve += px(96.0f); // password-save row (same footprint)
+        if (m->num_game_discs > 0) reserve += px(36.0f + 52.0f * m->num_game_discs);
         if (m->msu1_patch_available) reserve += px(198.0f);  // MSU-1 patch-available sub-block
                                                               // (title + up-to-3-line wrapped note + 2 stacked buttons)
         float art_h = ImGui::GetContentRegionAvail().y - reserve;
@@ -1139,6 +1234,8 @@ void draw_game_panel(LauncherModel* m, const LauncherTheme& th, bool fill_h = fa
         ImGui::EndChild();
         ImGui::PopStyleColor(2);
     }
+
+    draw_game_discs_block(m, th, availw);
 
     // SAVES lives in the GAME card as a compact row (no separate card / eyebrow).
     // Present only for games with battery SRAM — data-driven, never by name.
@@ -7905,6 +8002,7 @@ void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logic
 
     draw_footer(m, th, footer_h);
     draw_setup_wizard_modal(m, th);
+    draw_game_discs_modal(m, th);
     draw_bios_confirm_modal(m, th);
     draw_bios_play_modal(m, th);
     draw_pgo_confirm_modal(m, th);
