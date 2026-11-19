@@ -2822,6 +2822,69 @@ static void draw_ctrl_icon(ImDrawList* dl, ImVec2 c, float w, float h, int kind)
     dl->AddCircle(ImVec2(c.x + bw * 0.13f, c.y + bh * 0.18f), sr, edge, 0, 1.2f);
 }
 
+// 19/11/2026 (pedido do Samuel): artes dos controles com o tema do Mega Man 8, lidas de
+// <projeto>/game-assets/controles (xbox-series.png, xbox-360.png, ps5.png, switch-pro.png; a
+// pasta não vai para o GitHub). Aparecem grandes ao lado do controle padrão: coloridas com o
+// controle ligado, em preto e branco quando ele se desconecta. Sem os arquivos, fica o ícone
+// desenhado (draw_ctrl_icon).
+enum { CA_XSERIES, CA_X360, CA_PS5, CA_SWITCH, CA_N };
+static struct {
+    LauncherTexture color[CA_N];
+    LauncherTexture gray[CA_N];
+    bool tried = false;
+} g_ctrl_art;
+
+static void ctrl_art_load(LauncherModel* m) {
+    if (g_ctrl_art.tried) return;
+    g_ctrl_art.tried = true;
+    const char* d = m->launcher_bg_dir ? m->launcher_bg_dir() : nullptr;
+    if (!d || !d[0]) return;
+    namespace fs = std::filesystem;
+    const fs::path dir = fs::u8path(d).parent_path() / "controles";
+    static const char* names[CA_N] = { "xbox-series.png", "xbox-360.png", "ps5.png", "switch-pro.png" };
+    for (int i = 0; i < CA_N; ++i) {
+        const auto p8 = (dir / names[i]).u8string();
+        const std::string path(p8.begin(), p8.end());
+        g_ctrl_art.color[i] = launcher_texture_load(path.c_str());
+        if (g_ctrl_art.color[i].id) g_ctrl_art.gray[i] = launcher_texture_load_gray(path.c_str(), 0.85f);
+    }
+}
+
+// Qual arte mostrar para o jogador p (-1 = nenhuma: sem controle ou teclado).
+static int ctrl_art_index(const LauncherModel* m, int p, int kind) {
+    if (kind < 2) return -1;
+    if (kind == 3) return CA_PS5;
+    if (kind == 4) return CA_SWITCH;
+    if (kind == 2) return std::strstr(m->player_pad_name[p], "360") ? CA_X360 : CA_XSERIES;
+    return CA_XSERIES;   // outro controle: a arte mais genérica
+}
+
+// O controle escolhido pelo jogador p está ligado agora? (teclado / nenhum: sim)
+static bool ctrl_live(const LauncherModel* m, int p) {
+    if (m->s.player_src[p] != 2) return true;
+    const char* g = m->s.player_gamepad_guid[p];
+    // o GUID salvo é o principal; o número do aparelho e o nome cobrem o caso de o GUID mudar
+    // ao trocar de cabo para Bluetooth
+    const char* nm = m->player_pad_name[p];
+    for (int j = 0; j < g_pad_count; ++j) {
+        if (g[0] && g_pads[j].guid[0] && std::strcmp(g_pads[j].guid, g) == 0) return true;
+        if (m->player_pad_id[p] && g_pads[j].id == m->player_pad_id[p]) return true;
+        if (nm[0] && g_pads[j].name[0] && std::strcmp(g_pads[j].name, nm) == 0) return true;
+    }
+    if (std::getenv("MM8_LAUNCHER_DEBUG")) {
+        static double last = -10.0;
+        if (ImGui::GetTime() - last > 5.0) {
+            last = ImGui::GetTime();
+            std::fprintf(stderr, "launcher: jogador %d desconectado? guid=%s id=%u nome=%s; %d controles:\n",
+                         p + 1, g, (unsigned)m->player_pad_id[p], nm, g_pad_count);
+            for (int j = 0; j < g_pad_count; ++j)
+                std::fprintf(stderr, "  [%d] guid=%s id=%u nome=%s\n", j, g_pads[j].guid,
+                             (unsigned)g_pads[j].id, g_pads[j].name);
+        }
+    }
+    return false;
+}
+
 void draw_player_panel(LauncherModel* m, const LauncherTheme& th, int p, float w) {
     char id[24];  snprintf(id, sizeof(id), "player%d", p);
     char eb[40];
@@ -2863,50 +2926,107 @@ void draw_player_panel(LauncherModel* m, const LauncherTheme& th, int p, float w
         // 19/11/2026 (pedido do Samuel): ao lado do controle padrão, uma setinha aponta para o
         // controle que vai ser usado de verdade (Xbox / PlayStation / teclado...), com um "check".
         const int kind = ctrl_kind(m, p);
-        float fw = px(120), fh = px(78);
+        ctrl_art_load(m);
+        const int ai = ctrl_art_index(m, p, kind);
+        const bool has_art = ai >= 0 && g_ctrl_art.color[ai].id && g_ctrl_art.color[ai].w > 0;
+        const bool live = ctrl_live(m, p);
+        float fw = px(110), fh = px(72);
         if (art.id && art.w > 0 && art.h > 0) {
             const float s = (fw / art.w < fh / art.h) ? fw / (float)art.w : fh / (float)art.h;
             fw = art.w * s; fh = art.h * s;
         }
-        const float aw = px(40), icw = px(88), ich = px(62);
-        const float total = fw + aw + icw;
-        if (kind == 0 || inner < total + px(8)) {
+        const float aw = px(36);
+        const float art_ratio = has_art ? (float)g_ctrl_art.color[ai].h / (float)g_ctrl_art.color[ai].w : 0.7f;
+        float icw = has_art ? px(210) : px(88);
+        bool show_pad = true;
+        if (has_art && inner < fw + aw + icw + px(8)) {
+            icw = inner - fw - aw - px(8);
+            if (icw < px(140)) {   // cartão estreito: só a arte do controle em uso
+                show_pad = false;
+                icw = inner - px(8) < px(210) ? inner - px(8) : px(210);
+            }
+        }
+        const float ich = has_art ? icw * art_ratio : px(62);
+        const float total = show_pad ? fw + aw + icw : icw;
+        if (kind == 0 || (!has_art && inner < total + px(8))) {
             image_fit_centered(art, 120, 78, inner);
         } else {
             const float lx0 = ImGui::GetCursorPosX();
             const float x = lx0 + (inner - total) * 0.5f;
             const float y = ImGui::GetCursorPosY();
             const float rowh = fh > ich ? fh : ich;
-            ImGui::SetCursorPos(ImVec2(x, y + (rowh - fh) * 0.5f));
-            const ImVec2 a0 = ImGui::GetCursorScreenPos();
-            if (art.id) ImGui::Image(tid(art), ImVec2(fw, fh));
-            else ImGui::Dummy(ImVec2(fw, fh));
             ImDrawList* dl = ImGui::GetWindowDrawList();
-            const float cy = a0.y + fh * 0.5f;
-            // seta (anda um pouquinho, para chamar a atenção sem incomodar)
-            const float wob = 2.5f * (float)std::sin(ImGui::GetTime() * 3.0);
-            const float sx0 = a0.x + fw + px(6), sx1 = a0.x + fw + aw - px(8) + wob;
-            const ImU32 ac = imcol(th.accent);
-            dl->AddLine(ImVec2(sx0, cy), ImVec2(sx1 - px(6), cy), ac, px(3));
-            dl->AddTriangleFilled(ImVec2(sx1, cy), ImVec2(sx1 - px(10), cy - px(7)),
-                                  ImVec2(sx1 - px(10), cy + px(7)), ac);
-            const ImVec2 ic(a0.x + fw + aw + icw * 0.5f, cy);
-            draw_ctrl_icon(dl, ic, icw, ich, kind);
-            // check verde no canto de cima à direita do controle escolhido
-            const ImVec2 bc(ic.x + icw * 0.5f - px(4), ic.y - ich * 0.5f + px(4));
-            const float br = px(10);
+            ImVec2 ic;
+            if (show_pad) {
+                ImGui::SetCursorPos(ImVec2(x, y + (rowh - fh) * 0.5f));
+                const ImVec2 a0 = ImGui::GetCursorScreenPos();
+                if (art.id) ImGui::Image(tid(art), ImVec2(fw, fh));
+                else ImGui::Dummy(ImVec2(fw, fh));
+                const float cy = a0.y + fh * 0.5f;
+                // seta (anda um pouquinho, para chamar a atenção sem incomodar)
+                const float wob = live ? 2.5f * (float)std::sin(ImGui::GetTime() * 3.0) : 0.0f;
+                const float sx0 = a0.x + fw + px(6), sx1 = a0.x + fw + aw - px(8) + wob;
+                const ImU32 ac = live ? imcol(th.accent) : IM_COL32(120, 120, 128, 255);
+                dl->AddLine(ImVec2(sx0, cy), ImVec2(sx1 - px(6), cy), ac, px(3));
+                dl->AddTriangleFilled(ImVec2(sx1, cy), ImVec2(sx1 - px(10), cy - px(7)),
+                                      ImVec2(sx1 - px(10), cy + px(7)), ac);
+                ic = ImVec2(a0.x + fw + aw + icw * 0.5f, cy);
+            } else {
+                ImGui::SetCursorPos(ImVec2(x, y));
+                const ImVec2 a0 = ImGui::GetCursorScreenPos();
+                ic = ImVec2(a0.x + icw * 0.5f, a0.y + rowh * 0.5f);
+            }
+            if (has_art) {
+                const ImVec2 p0(ic.x - icw * 0.5f, ic.y - ich * 0.5f), p1(ic.x + icw * 0.5f, ic.y + ich * 0.5f);
+                if (live) {
+                    // brilho azul bem leve atrás do controle ligado
+                    const float pulse = 0.5f + 0.5f * (float)std::sin(ImGui::GetTime() * 2.0);
+                    dl->AddCircleFilled(ic, icw * 0.42f, IM_COL32(60, 150, 255, (int)(18 + 14 * pulse)), 48);
+                    dl->AddImage(tid(g_ctrl_art.color[ai]), p0, p1);
+                } else {
+                    const bool g_ok = g_ctrl_art.gray[ai].id != 0;
+                    dl->AddImage(tid(g_ok ? g_ctrl_art.gray[ai] : g_ctrl_art.color[ai]), p0, p1,
+                                 ImVec2(0, 0), ImVec2(1, 1),
+                                 g_ok ? IM_COL32(255, 255, 255, 190) : IM_COL32(110, 110, 110, 190));
+                }
+            } else {
+                draw_ctrl_icon(dl, ic, icw, ich, kind);
+            }
+            // selo no canto de cima à direita: check verde (ligado) ou X vermelho (desconectado)
+            const ImVec2 bc(ic.x + icw * 0.5f - px(has_art ? 14 : 4), ic.y - ich * 0.5f + px(has_art ? 12 : 4));
+            const float br = px(has_art ? 13 : 10);
             dl->AddCircleFilled(ImVec2(bc.x, bc.y + 1.5f), br, IM_COL32(0, 0, 0, 100));
-            dl->AddCircleFilled(bc, br, imcol(th.good));
+            dl->AddCircleFilled(bc, br, live ? imcol(th.good) : IM_COL32(215, 55, 50, 255));
             dl->AddCircle(bc, br, IM_COL32(255, 255, 255, 200), 0, px(1.5f));
-            const ImVec2 ck[3] = { ImVec2(bc.x - br * 0.45f, bc.y + br * 0.02f),
-                                   ImVec2(bc.x - br * 0.10f, bc.y + br * 0.38f),
-                                   ImVec2(bc.x + br * 0.50f, bc.y - br * 0.36f) };
-            dl->AddPolyline(ck, 3, IM_COL32_WHITE, 0, px(2.4f));
-            ImGui::SetCursorPos(ImVec2(x + fw, y));
-            ImGui::InvisibleButton("##ctrlico", ImVec2(aw + icw, rowh));
-            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Em uso: %s", launcher_model_player_src_label(m, p));
+            if (live) {
+                const ImVec2 ck[3] = { ImVec2(bc.x - br * 0.45f, bc.y + br * 0.02f),
+                                       ImVec2(bc.x - br * 0.10f, bc.y + br * 0.38f),
+                                       ImVec2(bc.x + br * 0.50f, bc.y - br * 0.36f) };
+                dl->AddPolyline(ck, 3, IM_COL32_WHITE, 0, px(2.4f));
+            } else {
+                const float k = br * 0.42f;
+                dl->AddLine(ImVec2(bc.x - k, bc.y - k), ImVec2(bc.x + k, bc.y + k), IM_COL32_WHITE, px(2.4f));
+                dl->AddLine(ImVec2(bc.x - k, bc.y + k), ImVec2(bc.x + k, bc.y - k), IM_COL32_WHITE, px(2.4f));
+            }
+            ImGui::SetCursorPos(ImVec2(show_pad ? x + fw : x, y));
+            ImGui::InvisibleButton("##ctrlico", ImVec2(show_pad ? aw + icw : icw, rowh));
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip(live ? "Em uso: %s" : "Desconectado: %s", launcher_model_player_src_label(m, p));
             ImGui::SetCursorPos(ImVec2(lx0, y + rowh));
             ImGui::Dummy(ImVec2(0, 0));
+            if (!live) {
+                // aviso pulsando devagar embaixo da arte
+                const float pulse = 0.80f + 0.20f * (float)std::sin(ImGui::GetTime() * 4.0);
+                const char* t1 = "CONTROLE DESCONECTADO";
+                const char* t2 = "Reconecte o controle ou escolha outro abaixo.";
+                const float w1 = ImGui::CalcTextSize(t1).x, w2 = ImGui::CalcTextSize(t2).x;
+                ImGui::SetCursorPosX(lx0 + (inner - w1) * 0.5f);
+                ImGui::TextColored(ImVec4(1.0f, 0.42f, 0.38f, pulse), "%s", t1);
+                ImGui::SetCursorPosX(lx0 + (inner > w2 ? (inner - w2) * 0.5f : 0.0f));
+                ImGui::PushStyleColor(ImGuiCol_Text, col(th.text_muted));
+                ImGui::TextWrapped("%s", t2);
+                ImGui::PopStyleColor();
+            }
         }
     }
     ImGui::Dummy(ImVec2(0, px(6)));
@@ -2934,8 +3054,9 @@ void draw_player_panel(LauncherModel* m, const LauncherTheme& th, int p, float w
         const float btnh = px(32);
         if (mm_button("Configurar", ImVec2(half, btnh))) launcher_model_open_config(m, p);
         ImGui::SameLine(0, gap);
-        const bool on = m->s.player_src[p] != 0;
-        const char* st = on ? "conectado" : "sem controle";
+        // "conectado" só quando o aparelho escolhido está mesmo ligado (19/11/2026)
+        const bool on = m->s.player_src[p] != 0 && ctrl_live(m, p);
+        const char* st = on ? "conectado" : (m->s.player_src[p] != 0 ? "desconectado" : "sem controle");
         const float sw = px(10) + px(8) + ImGui::CalcTextSize(st).x;
         // center the dot+label within the right half, vertically on the button
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (half - sw) * 0.5f);
@@ -2988,6 +3109,9 @@ void panel_controller_draw(LauncherModel* m, const LauncherTheme* th) {
 // (SAVES only when the game has SRAM, folded into the GAME card — see
 // draw_save_row). A different system's profile simply contributes a
 // different panel list.
+static bool bg_showcase_ready(LauncherModel* m);                 // fwd (fundo do lançador)
+static void draw_bg_showcase(ImVec2 p0, ImVec2 size);            // fwd
+
 void draw_dashboard(LauncherModel* m, const LauncherTheme& th, int logical_w) {
     const SystemProfile* prof = (const SystemProfile*)m->profile;
     const LauncherPanel* game_p = find_composed(prof->panels_dashboard, "game", m);
@@ -3025,10 +3149,21 @@ void draw_dashboard(LauncherModel* m, const LauncherTheme& th, int logical_w) {
                 end_container();
             }
             if (game_p && ctrl_p) ImGui::SameLine(0, gap);
+            // 19/11/2026 (pedido do Samuel): em tela larga, o que sobra à direita dos cartões
+            // (que param em 2 memory cards de largura) vira uma vitrine com os fundos nítidos.
+            float dash_rw = 0.0f, show_w = 0.0f;
+            {
+                const float natural = 2.0f * px(300.0f) + gap + px(24.0f);
+                const float rw = ImGui::GetContentRegionAvail().x;
+                if (ctrl_p && bg_showcase_ready(m) && rw >= natural + gap + px(320.0f)) {
+                    dash_rw = natural;
+                    show_w = rw - natural - gap;
+                }
+            }
             if (ctrl_p) {
                 if (many_players) {
                     const float right_h = row_h > px(80.0f) ? row_h : px(80.0f);
-                    begin_container("dash_r", ImVec2(0, right_h),
+                    begin_container("dash_r", ImVec2(dash_rw, right_h),
                                     ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar);
                     // Tall enough for a clean fill-height memcard pair (icon,
                     // grid, Browse/New with padding) while controllers scroll
@@ -3052,7 +3187,7 @@ void draw_dashboard(LauncherModel* m, const LauncherTheme& th, int logical_w) {
                     }
                     end_container();
                 } else {
-                    begin_container("dash_r", ImVec2(0, 0), ImGuiChildFlags_AutoResizeY);
+                    begin_container("dash_r", ImVec2(dash_rw, 0), ImGuiChildFlags_AutoResizeY);
                     ctrl_p->draw(m, &th);
                     if (ident_p) {
                         ImGui::Dummy(ImVec2(0, gap));
@@ -3063,6 +3198,18 @@ void draw_dashboard(LauncherModel* m, const LauncherTheme& th, int logical_w) {
                         save_p->draw(m, &th);
                     }
                     end_container();
+                }
+                if (show_w > 0.0f) {
+                    const float sh = ImGui::GetItemRectSize().y;
+                    ImGui::SameLine(0, gap);
+                    const ImVec2 sp = ImGui::GetCursorScreenPos();
+                    // pelo menos a altura dos cartões; em janela alta, desce até o rodapé
+                    // (sem passar de 4:3, para a imagem não ficar cortada demais)
+                    float h = show_w * 0.75f;
+                    if (h < sh) h = sh;
+                    if (many_players || h > row_h) h = row_h;
+                    if (h > px(120.0f)) draw_bg_showcase(sp, ImVec2(show_w, h));
+                    ImGui::Dummy(ImVec2(show_w, h > 0 ? h : 1.0f));
                 }
             }
         } else if (has_tpak) {
@@ -7657,6 +7804,8 @@ const LauncherPanel kPanelRegistry[] = {
 // running cursor) so it is pixel-identical on every view and the CTA's glow
 // always has clearance below the divider — Settings has less body content, and
 // a cursor-relative footer let the glow ride up into the rule.
+static void draw_footer_tip(float x0, float x1, float cy);   // fwd (dicas)
+
 void draw_footer(LauncherModel* m, const LauncherTheme& th, float footer_h) {
     const ImVec2 origin = ImGui::GetCursorScreenPos();
     const float  fullw  = ImGui::GetContentRegionAvail().x;
@@ -7788,6 +7937,10 @@ void draw_footer(LauncherModel* m, const LauncherTheme& th, float footer_h) {
         ImGui::IsKeyPressed(ImGuiKey_Backspace, false))
         ImGui::SetKeyboardFocusHere();
     float play_x = origin.x + fullw - play_w;
+    if (m->view == LNG_VIEW_DASHBOARD) {
+        const float right = play_x - (m->netplay_supported ? px(170.0f) + px(12.0f) : 0.0f) - px(24.0f);
+        draw_footer_tip(origin.x + px(300.0f), right, cta_y + play_h * 0.5f);
+    }
     if (m->netplay_supported &&
         (m->view == LNG_VIEW_DASHBOARD || m->view == LNG_VIEW_SETTINGS ||
          m->view == LNG_VIEW_CONTROLLER)) {
@@ -8707,15 +8860,20 @@ void draw_restore_defaults_modal(LauncherModel* m) {
 
 // ---- Fundo com imagens do jogo (19/11/2026, pedido do Samuel) ------------------------------
 // As imagens de <projeto>/game-assets/launcher-bg (png/jpg, até 8) aparecem atrás da interface,
-// borradas e escurecidas para não atrapalhar a leitura, cobrindo a janela toda, com um zoom bem
-// lento e troca suave a cada 12 s. A pasta é olhada de novo a cada 5 s enquanto estiver vazia.
+// levemente borradas e escurecidas (dá para reconhecer a cena sem atrapalhar a leitura), cobrindo
+// a janela toda, com um zoom bem lento e troca suave a cada 12 s. Em tela larga, a sobra à direita
+// dos cartões mostra as mesmas imagens nítidas (draw_bg_showcase), trocando junto com o fundo.
+// A pasta é olhada de novo a cada 5 s enquanto estiver vazia.
 static struct {
     std::string dir;
-    LauncherTexture tex[8];
+    LauncherTexture tex[8];     // borradas (fundo)
+    LauncherTexture sharp[8];   // nítidas (vitrine da tela larga)
     int n = 0;
     double last_scan = -100.0;
     bool scanned_full = false;
 } g_bgs;
+
+static const double kBgPeriod = 12.0, kBgFade = 2.0;
 
 static void bg_scan(LauncherModel* m) {
     const double now = ImGui::GetTime();
@@ -8741,25 +8899,42 @@ static void bg_scan(LauncherModel* m) {
     std::sort(files.begin(), files.end());
     for (const std::string& f : files) {
         if (g_bgs.n >= 8) break;
-        // ~640 px de largura, raio 7 (x3 passadas) e 45% do brilho: dá o "borrado e difuso"
-        LauncherTexture t = launcher_texture_load_blurred(f.c_str(), 640, 7, 0.45f);
-        if (t.id) g_bgs.tex[g_bgs.n++] = t;
+        // ~960 px de largura, raio 3 (x3 passadas) e 60% do brilho: borrado leve, ainda se vê a
+        // cena (antes: 640 px, raio 7 e 45%, que deixava só manchas — Samuel, 19/11/2026)
+        LauncherTexture t = launcher_texture_load_blurred(f.c_str(), 960, 3, 0.60f);
+        if (!t.id) continue;
+        g_bgs.sharp[g_bgs.n] = launcher_texture_load(f.c_str());
+        g_bgs.tex[g_bgs.n++] = t;
     }
     if (g_bgs.n > 0) g_bgs.scanned_full = true;
+}
+
+static bool bg_showcase_ready(LauncherModel* m) {
+    bg_scan(m);
+    for (int i = 0; i < g_bgs.n; ++i)
+        if (g_bgs.sharp[i].id) return true;
+    return false;
+}
+
+// Imagem atual, a anterior e quanto da atual já entrou (0..1), iguais para o fundo e a vitrine.
+static void bg_phase(int& cur, int& prev, float& mix, double& ph) {
+    const double t = ImGui::GetTime();
+    cur = (int)(t / kBgPeriod) % g_bgs.n;
+    prev = (cur + g_bgs.n - 1) % g_bgs.n;
+    ph = std::fmod(t, kBgPeriod);
+    mix = (g_bgs.n > 1 && ph < kBgFade) ? (float)(ph / kBgFade) : 1.0f;
 }
 
 static void draw_launcher_bg(LauncherModel* m, ImVec2 origin, ImVec2 size) {
     bg_scan(m);
     if (g_bgs.n == 0) return;
     ImDrawList* bg = ImGui::GetBackgroundDrawList();
-    const double t = ImGui::GetTime();
-    const double period = 12.0, fade = 2.0;
-    const int cur = (int)(t / period) % g_bgs.n;
-    const double ph = std::fmod(t, period);
+    int cur, prev; float mix; double ph;
+    bg_phase(cur, prev, mix, ph);
     auto draw_one = [&](int i, float alpha, double age) {
         const LauncherTexture& tx = g_bgs.tex[i];
         // cobre a janela toda (corta o que sobra), com zoom lento de 100% a 106%
-        const float zoom = 1.0f + 0.06f * (float)(age / (period + fade));
+        const float zoom = 1.0f + 0.06f * (float)(age / (kBgPeriod + kBgFade));
         float s = size.x / tx.w > size.y / tx.h ? size.x / tx.w : size.y / tx.h;
         s *= zoom;
         const float w = tx.w * s, h = tx.h * s;
@@ -8768,10 +8943,9 @@ static void draw_launcher_bg(LauncherModel* m, ImVec2 origin, ImVec2 size) {
                      ImGui::GetColorU32(ImVec4(1, 1, 1, alpha)));
     };
     const float a = 0.85f;
-    if (g_bgs.n > 1 && ph < fade) {
-        const int prev = (cur + g_bgs.n - 1) % g_bgs.n;
-        draw_one(prev, a, period + ph);
-        draw_one(cur, a * (float)(ph / fade), ph);
+    if (mix < 1.0f) {
+        draw_one(prev, a, kBgPeriod + ph);
+        draw_one(cur, a * mix, ph);
     } else {
         draw_one(cur, a, ph);
     }
@@ -8783,6 +8957,91 @@ static void draw_launcher_bg(LauncherModel* m, ImVec2 origin, ImVec2 size) {
     bg->AddRectFilledMultiColor(ImVec2(origin.x, origin.y + size.y * 0.75f), ImVec2(origin.x + size.x, origin.y + size.y),
                                 imcol(th.background, 0.0f), imcol(th.background, 0.0f),
                                 imcol(th.background, 0.80f), imcol(th.background, 0.80f));
+}
+
+// Vitrine da tela larga: as imagens nítidas num quadro com cantos arredondados, cortadas para
+// cobrir o quadro, com o mesmo zoom lento e a mesma troca suave do fundo.
+static void draw_bg_showcase(ImVec2 p0, ImVec2 size) {
+    if (g_bgs.n == 0 || size.x < 8 || size.y < 8) return;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const LauncherTheme& th = *g_th;
+    const ImVec2 p1(p0.x + size.x, p0.y + size.y);
+    const float r = px(14.0f);
+    int cur, prev; float mix; double ph;
+    bg_phase(cur, prev, mix, ph);
+    dl->AddRectFilled(ImVec2(p0.x + px(3), p0.y + px(5)), ImVec2(p1.x + px(3), p1.y + px(5)),
+                      IM_COL32(0, 0, 0, 110), r);   // sombra
+    dl->AddRectFilled(p0, p1, imcol(th.background, 1.0f), r);
+    auto draw_one = [&](int i, float alpha, double age) {
+        const LauncherTexture& tx = g_bgs.sharp[i].id ? g_bgs.sharp[i] : g_bgs.tex[i];
+        if (!tx.id || tx.w <= 0 || tx.h <= 0) return;
+        // recorte (em UV) que cobre o quadro mantendo a proporção, com zoom lento até 106%
+        const float zoom = 1.0f + 0.06f * (float)(age / (kBgPeriod + kBgFade));
+        const float box = size.x / size.y, img = (float)tx.w / (float)tx.h;
+        float uw = 1.0f, vh = 1.0f;
+        if (img > box) uw = box / img; else vh = img / box;
+        uw /= zoom; vh /= zoom;
+        const ImVec2 uv0(0.5f - uw * 0.5f, 0.5f - vh * 0.5f), uv1(0.5f + uw * 0.5f, 0.5f + vh * 0.5f);
+        dl->AddImageRounded(tid(tx), p0, p1, uv0, uv1,
+                            ImGui::GetColorU32(ImVec4(1, 1, 1, alpha)), r);
+    };
+    if (mix < 1.0f) {
+        draw_one(prev, 1.0f, kBgPeriod + ph);
+        draw_one(cur, mix, ph);
+    } else {
+        draw_one(cur, 1.0f, ph);
+    }
+    // moldura no estilo dos botões: borda clara por fora, escura por dentro
+    dl->AddRect(p0, p1, imcol(th.accent2, 0.85f), r, 0, px(2.0f));
+    dl->AddRect(ImVec2(p0.x + px(3), p0.y + px(3)), ImVec2(p1.x - px(3), p1.y - px(3)),
+                IM_COL32(0, 0, 0, 120), r - px(3), 0, px(1.5f));
+    // pontinhos embaixo: qual imagem está na tela
+    if (g_bgs.n > 1) {
+        const float dr = px(4.0f), dg = px(14.0f);
+        const float dx0 = p0.x + size.x * 0.5f - dg * (float)(g_bgs.n - 1) * 0.5f;
+        const float dy = p1.y - px(16.0f);
+        for (int i = 0; i < g_bgs.n; ++i) {
+            const ImVec2 c(dx0 + dg * (float)i, dy);
+            dl->AddCircleFilled(ImVec2(c.x, c.y + 1.0f), dr, IM_COL32(0, 0, 0, 140));
+            dl->AddCircleFilled(c, dr, i == cur ? IM_COL32(255, 255, 255, 235) : IM_COL32(255, 255, 255, 90));
+        }
+    }
+}
+
+// ---- Dicas no rodapé (19/11/2026, pedido do Samuel) -----------------------------------------
+// Uma frase por vez entre "Pular esta tela" e os botões, aparecendo e sumindo devagar.
+static const char* const kLauncherTips[] = {
+    "Dica: durante o jogo, ESC abre o menu; em EXTRAS ficam a tradução, as bordas e outros ajustes.",
+    "Dica: em EXTRAS > BORDAS, as faixas dos lados da tela larga podem mostrar reflexo, luz ou uma imagem.",
+    "Dica: escolha o controle de cada jogador no cartão dele; o desenho mostra qual está em uso.",
+    "Dica: se o controle se desconectar, o desenho dele fica cinza aqui. É só ligá-lo de novo.",
+    "Dica: as imagens da pasta game-assets/launcher-bg viram o fundo desta tela.",
+    "Dica: os discos do jogo ficam no cartão do jogo; use Trocar... para apontar outro arquivo.",
+    "Dica: marque \"Pular esta tela da próxima vez\" para ir direto ao jogo.",
+};
+
+static void draw_footer_tip(float x0, float x1, float cy) {
+    const int n = (int)(sizeof(kLauncherTips) / sizeof(kLauncherTips[0]));
+    if (x1 - x0 < px(220.0f)) return;
+    const double per = 9.0, t = ImGui::GetTime();
+    const int i = (int)(t / per) % n;
+    const double ph = std::fmod(t, per);
+    float a = 1.0f;
+    if (ph < 0.8) a = (float)(ph / 0.8);
+    else if (ph > per - 0.8) a = (float)((per - ph) / 0.8);
+    const char* tip = kLauncherTips[i];
+    ImFont* f = ImGui::GetFont();
+    const float fs = ImGui::GetFontSize() * 0.92f;
+    const float maxw = x1 - x0;
+    const ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, maxw, tip);
+    const float tx = x0 + (maxw - ts.x) * 0.5f, ty = cy - ts.y * 0.5f;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const LauncherTheme& th = *g_th;
+    const ImVec4 tc = col(th.text);
+    a *= 0.85f;
+    const ImVec4 clip(x0, ty - 4, x1, ty + ts.y + 4);
+    dl->AddText(f, fs, ImVec2(tx + 1, ty + 1), IM_COL32(0, 0, 0, (int)(170 * a)), tip, nullptr, maxw, &clip);
+    dl->AddText(f, fs, ImVec2(tx, ty), ImGui::GetColorU32(ImVec4(tc.x, tc.y, tc.z, a)), tip, nullptr, maxw, &clip);
 }
 
 void draw_ui(LauncherModel* m, const LauncherTheme& th, int logical_w, int logical_h) {
