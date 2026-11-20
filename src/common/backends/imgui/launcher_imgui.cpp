@@ -10021,6 +10021,14 @@ extern "C" LngAction launcher_backend_run(LauncherPlatform* p,
 
         // Re-poll connected gamepads every frame so hot-plugged pads (e.g. a
         // DualSense powered on after launch) appear without a relaunch.
+#if defined(LNG_SDL3)
+        // Controle Xbox que perdeu o sinal e voltou sem o SDL reenumerar (20/11/2026):
+        // fecha os controles do ImGui e do lançador e reinicia o subsistema de controles.
+        if (launcher_input_rescan_due()) {
+            ImGui_ImplSDL3_SetGamepadMode(ImGui_ImplSDL3_GamepadMode_AutoFirst, nullptr, 0);
+            launcher_input_restart_sdl();
+        }
+#endif
         g_pad_count = launcher_input_poll(
             g_pads, LNG_MAX_PADS, m->has_gyro_controls ? 1 : 0);
 

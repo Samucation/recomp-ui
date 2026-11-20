@@ -47,6 +47,13 @@ uint32_t launcher_input_gamepad_button_mask(uint32_t id);
 // the launcher tears down SDL.
 void launcher_input_shutdown(void);
 
+// Recuperação do controle que perdeu o sinal (Windows/SDL3; nos outros devolve 0):
+// 1 quando o XInput vê mais controles ligados do que o SDL há 2 s (o SDL não reenumerou o
+// aparelho). Aí o chamador fecha os controles que mantém abertos (ImGui) e chama
+// launcher_input_restart_sdl(), que fecha os do lançador e reinicia o subsistema do SDL.
+int launcher_input_rescan_due(void);
+void launcher_input_restart_sdl(void);
+
 #ifdef __cplusplus
 }
 #endif

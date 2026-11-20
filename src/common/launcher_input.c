@@ -89,6 +89,69 @@ void launcher_input_shutdown(void) {
     for (int i = 0; i < LNG_MAX_PADS; ++i) close_open(&s_open[i]);
 }
 
+/* Recuperação do controle (20/11/2026, pedido do Samuel): um controle Xbox sem fio que perde
+ * o sinal pode voltar sem que o SDL o enumere de novo (só fechando e abrindo o programa).
+ * O XInput percebe a volta. Se o XInput vê mais controles ligados do que o SDL conhece por
+ * 2 s seguidos, pede para reiniciar o subsistema de controles do SDL (o chamador fecha antes
+ * os controles que mantém abertos). Limite: 3 tentativas seguidas, depois uma a cada 30 s. */
+#if defined(_WIN32) && defined(LNG_SDL3)
+typedef struct { unsigned long pkt; unsigned short btn; unsigned char lt, rt; short lx, ly, rx, ry; } XPadState;
+typedef unsigned long (__stdcall *XStateFn)(unsigned long, XPadState*);
+static int xinput_connected_count(void) {
+    static XStateFn fn = NULL;
+    static int tried = 0;
+    if (!tried) {
+        tried = 1;
+        HMODULE h = LoadLibraryA("xinput1_4.dll");
+        if (!h) h = LoadLibraryA("xinput1_3.dll");
+        if (h) fn = (XStateFn)(void*)GetProcAddress(h, "XInputGetState");
+    }
+    if (!fn) return -1;
+    int n = 0;
+    for (unsigned long i = 0; i < 4; ++i) {
+        XPadState st;
+        if (fn(i, &st) == 0) ++n;
+    }
+    return n;
+}
+#endif
+
+int launcher_input_rescan_due(void) {
+#if defined(_WIN32) && defined(LNG_SDL3)
+    static Uint64 last_check = 0, mismatch_since = 0, last_restart = 0;
+    static int in_row = 0;
+    const Uint64 now = SDL_GetTicks();
+    if (last_check && now - last_check < 1000) return 0;
+    last_check = now;
+    const int xin = xinput_connected_count();
+    int sdl_n = 0;
+    SDL_JoystickID* ids = SDL_GetJoysticks(&sdl_n);
+    SDL_free(ids);
+    if (xin <= sdl_n) { mismatch_since = 0; in_row = 0; return 0; }
+    if (!mismatch_since) mismatch_since = now ? now : 1;
+    if (now - mismatch_since < 2000) return 0;
+    if (last_restart && now - last_restart < (in_row < 3 ? 5000u : 30000u)) return 0;
+    last_restart = now;
+    ++in_row;
+    fprintf(stderr, "launcher: XInput ve %d controle(s), SDL ve %d: reenumerando\n", xin, sdl_n);
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+void launcher_input_restart_sdl(void) {
+#if defined(LNG_SDL3)
+    launcher_input_shutdown();
+    int ng = 0, nj = 0;
+    while (SDL_WasInit(SDL_INIT_GAMEPAD) && ng < 16) { SDL_QuitSubSystem(SDL_INIT_GAMEPAD); ++ng; }
+    while (SDL_WasInit(SDL_INIT_JOYSTICK) && nj < 16) { SDL_QuitSubSystem(SDL_INIT_JOYSTICK); ++nj; }
+    for (int i = 0; i < nj; ++i) (void)SDL_InitSubSystem(SDL_INIT_JOYSTICK);
+    if (ng == 0) ng = 1;
+    for (int i = 0; i < ng; ++i) (void)SDL_InitSubSystem(SDL_INIT_GAMEPAD);
+#endif
+}
+
 int launcher_input_gamepad_at_rest(uint32_t id) {
     OpenPad* pad = find_open(id);
     if (!pad || !pad->handle) return 1;  // no handle → don't block capture
