@@ -13,6 +13,8 @@
  * driver HIDAPI do SDL não informa a carga ("SEM LEITURA" no jogo do Samuel); o XInput informa.
  * Usado só para controles Xbox e só quando o SDL não sabe. Sem DLL ou sem controle XInput: 0. */
 #if defined(_WIN32)
+/* Do runtime (psxrecomp/runtime/src/wgi_battery.c), ligado no mesmo executável. */
+int psx_wgi_battery(unsigned short vid, unsigned short pid, int *pct, int *power);
 typedef struct { unsigned char type, level; } XBatInfo;
 typedef unsigned long (__stdcall *XBatFn)(unsigned long, unsigned char, XBatInfo*);
 static int xinput_battery(int* pct, int* power) {
@@ -267,6 +269,11 @@ int launcher_input_poll(LauncherPad* out, int max, int enable_gyro) {
                 }
                 out[n].battery_pct = pct >= 0 && pct <= 100 ? pct : -1;
 #if defined(_WIN32)
+                /* Xbox Series por Bluetooth: só o Windows.Gaming.Input informa (20/11/2026). */
+                if (out[n].power == 0 && out[n].battery_pct < 0)
+                    (void)psx_wgi_battery(SDL_GetGamepadVendor(opened->handle),
+                                          SDL_GetGamepadProduct(opened->handle),
+                                          &out[n].battery_pct, &out[n].power);
                 if (out[n].power == 0 && out[n].battery_pct < 0 &&
                     (SDL_strcasestr(out[n].name, "xbox") || SDL_strcasestr(out[n].name, "xinput")))
                     (void)xinput_battery(&out[n].battery_pct, &out[n].power);
