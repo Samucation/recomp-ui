@@ -15,6 +15,7 @@
 #if defined(_WIN32)
 /* Do runtime (psxrecomp/runtime/src/wgi_battery.c), ligado no mesmo executável. */
 int psx_wgi_battery(unsigned short vid, unsigned short pid, int *pct, int *power);
+int psx_win_bt_battery(unsigned short vid, unsigned short pid);
 typedef struct { unsigned char type, level; } XBatInfo;
 typedef unsigned long (__stdcall *XBatFn)(unsigned long, unsigned char, XBatInfo*);
 static int xinput_battery(int* pct, int* power) {
@@ -269,6 +270,17 @@ int launcher_input_poll(LauncherPad* out, int max, int enable_gyro) {
                 }
                 out[n].battery_pct = pct >= 0 && pct <= 100 ? pct : -1;
 #if defined(_WIN32)
+                /* 21/11/2026: a carga do Bluetooth do Windows (a das Configurações) vem antes de
+                 * todas; no Xbox Series por BLE o Windows.Gaming.Input dava 10% com o Windows em 73%.
+                 * Do SDL fica só o estado (carregando/carregado/com fio). */
+                if (out[n].power != 4) {
+                    const int bt = psx_win_bt_battery(SDL_GetGamepadVendor(opened->handle),
+                                                      SDL_GetGamepadProduct(opened->handle));
+                    if (bt >= 0) {
+                        out[n].battery_pct = bt;
+                        if (out[n].power != 2 && out[n].power != 3) out[n].power = 1;
+                    }
+                }
                 /* Xbox Series por Bluetooth: só o Windows.Gaming.Input informa (20/11/2026). */
                 if (out[n].power == 0 && out[n].battery_pct < 0)
                     (void)psx_wgi_battery(SDL_GetGamepadVendor(opened->handle),
